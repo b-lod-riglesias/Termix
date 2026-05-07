@@ -1,0 +1,4765 @@
+import type { AuthenticatedRequest } from "../../../types/index.js";
+import express from "express";
+import { db } from "../db/index.js";
+import {
+  hosts,
+  sshCredentials,
+  sshCredentialUsage,
+  fileManagerRecent,
+  fileManagerPinned,
+  fileManagerShortcuts,
+  sshFolders,
+  commandHistory,
+  recentActivity,
+  hostAccess,
+  userRoles,
+  sessionRecordings,
+} from "../db/schema.js";
+import {
+  eq,
+  and,
+  desc,
+  isNotNull,
+  or,
+  isNull,
+  gte,
+  sql,
+  inArray,
+} from "drizzle-orm";
+import type { Request, Response } from "express";
+import multer from "multer";
+import { sshLogger, databaseLogger } from "../../utils/logger.js";
+import { SimpleDBOps } from "../../utils/simple-db-ops.js";
+import { AuthManager } from "../../utils/auth-manager.js";
+import { PermissionManager } from "../../utils/permission-manager.js";
+import { DataCrypto } from "../../utils/data-crypto.js";
+import { SystemCrypto } from "../../utils/system-crypto.js";
+import { DatabaseSaveTrigger } from "../db/index.js";
+import { parseSSHKey } from "../../utils/ssh-key-utils.js";
+
+const router = express.Router();
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isValidPort(port: unknown): port is number {
+  return typeof port === "number" && port > 0 && port <= 65535;
+}
+
+function transformHostResponse(
+  host: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...host,
+    tags:
+      typeof host.tags === "string"
+        ? host.tags
+          ? host.tags.split(",").filter(Boolean)
+          : []
+        : [],
+    pin: !!host.pin,
+    enableTerminal: !!host.enableTerminal,
+    enableTunnel: !!host.enableTunnel,
+    enableFileManager: !!host.enableFileManager,
+    enableDocker: !!host.enableDocker,
+    showTerminalInSidebar: !!host.showTerminalInSidebar,
+    showFileManagerInSidebar: !!host.showFileManagerInSidebar,
+    showTunnelInSidebar: !!host.showTunnelInSidebar,
+    showDockerInSidebar: !!host.showDockerInSidebar,
+    showServerStatsInSidebar: !!host.showServerStatsInSidebar,
+    tunnelConnections: host.tunnelConnections
+      ? JSON.parse(host.tunnelConnections as string)
+      : [],
+    jumpHosts: host.jumpHosts ? JSON.parse(host.jumpHosts as string) : [],
+    quickActions: host.quickActions
+      ? JSON.parse(host.quickActions as string)
+      : [],
+    statsConfig: host.statsConfig
+      ? JSON.parse(host.statsConfig as string)
+      : undefined,
+    terminalConfig: host.terminalConfig
+      ? JSON.parse(host.terminalConfig as string)
+      : undefined,
+    dockerConfig: host.dockerConfig
+      ? JSON.parse(host.dockerConfig as string)
+      : undefined,
+    forceKeyboardInteractive: host.forceKeyboardInteractive === "true",
+    socks5ProxyChain: host.socks5ProxyChain
+      ? JSON.parse(host.socks5ProxyChain as string)
+      : [],
+    domain: host.domain || undefined,
+    security: host.security || undefined,
+    ignoreCert: !!host.ignoreCert,
+    guacamoleConfig: host.guacamoleConfig
+      ? JSON.parse(host.guacamoleConfig as string)
+      : undefined,
+  };
+}
+
+const authManager = AuthManager.getInstance();
+const permissionManager = PermissionManager.getInstance();
+const authenticateJWT = authManager.createAuthMiddleware();
+const requireDataAccess = authManager.createDataAccessMiddleware();
+
+/**
+ * @openapi
+ * /ssh/db/host/internal:
+ *   get:
+ *     summary: Get internal SSH host data
+ *     description: Returns internal SSH host data for autostart tunnels. Requires internal auth token.
+ *     tags:
+ *       - SSH
+ *     responses:
+ *       200:
+ *         description: A list of autostart hosts.
+ *       403:
+ *         description: Forbidden.
+ *       500:
+ *         description: Failed to fetch autostart SSH data.
+ */
+router.get("/db/host/internal", async (req: Request, res: Response) => {
+  try {
+    const internalToken = req.headers["x-internal-auth-token"];
+    const systemCrypto = SystemCrypto.getInstance();
+    const expectedToken = await systemCrypto.getInternalAuthToken();
+
+    if (internalToken !== expectedToken) {
+      sshLogger.warn(
+        "Unauthorized attempt to access internal SSH host endpoint",
+        {
+          source: req.ip,
+          userAgent: req.headers["user-agent"],
+          providedToken: internalToken ? "present" : "missing",
+        },
+      );
+      return res.status(403).json({ error: "Forbidden" });
+    }
+  } catch (error) {
+    sshLogger.error("Failed to validate internal auth token", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+
+  try {
+    const autostartHosts = await db
+      .select()
+      .from(hosts)
+      .where(
+        and(eq(hosts.enableTunnel, true), isNotNull(hosts.tunnelConnections)),
+      );
+
+    const result = autostartHosts
+      .map((host) => {
+        const tunnelConnections = host.tunnelConnections
+          ? JSON.parse(host.tunnelConnections)
+          : [];
+
+        const hasAutoStartTunnels = tunnelConnections.some(
+          (tunnel: Record<string, unknown>) => tunnel.autoStart,
+        );
+
+        if (!hasAutoStartTunnels) {
+          return null;
+        }
+
+        return {
+          id: host.id,
+          userId: host.userId,
+          name: host.name || `autostart-${host.id}`,
+          ip: host.ip,
+          port: host.port,
+          username: host.username,
+          password: host.autostartPassword,
+          key: host.autostartKey,
+          keyPassword: host.autostartKeyPassword,
+          autostartPassword: host.autostartPassword,
+          autostartKey: host.autostartKey,
+          autostartKeyPassword: host.autostartKeyPassword,
+          authType: host.authType,
+          keyType: host.keyType,
+          credentialId: host.credentialId,
+          enableTunnel: true,
+          tunnelConnections: tunnelConnections.filter(
+            (tunnel: Record<string, unknown>) => tunnel.autoStart,
+          ),
+          pin: !!host.pin,
+          enableTerminal: !!host.enableTerminal,
+          enableFileManager: !!host.enableFileManager,
+          showTerminalInSidebar: !!host.showTerminalInSidebar,
+          showFileManagerInSidebar: !!host.showFileManagerInSidebar,
+          showTunnelInSidebar: !!host.showTunnelInSidebar,
+          showDockerInSidebar: !!host.showDockerInSidebar,
+          showServerStatsInSidebar: !!host.showServerStatsInSidebar,
+          tags: ["autostart"],
+        };
+      })
+      .filter(Boolean);
+
+    res.json(result);
+  } catch (err) {
+    sshLogger.error("Failed to fetch autostart SSH data", err);
+    res.status(500).json({ error: "Failed to fetch autostart SSH data" });
+  }
+});
+
+/**
+ * @openapi
+ * /ssh/db/host/internal/all:
+ *   get:
+ *     summary: Get all internal SSH host data
+ *     description: Returns all internal SSH host data. Requires internal auth token.
+ *     tags:
+ *       - SSH
+ *     responses:
+ *       200:
+ *         description: A list of all hosts.
+ *       401:
+ *         description: Invalid or missing internal authentication token.
+ *       500:
+ *         description: Failed to fetch all hosts.
+ */
+router.get("/db/host/internal/all", async (req: Request, res: Response) => {
+  try {
+    const internalToken = req.headers["x-internal-auth-token"];
+    if (!internalToken) {
+      return res
+        .status(401)
+        .json({ error: "Internal authentication token required" });
+    }
+
+    const systemCrypto = SystemCrypto.getInstance();
+    const expectedToken = await systemCrypto.getInternalAuthToken();
+
+    if (internalToken !== expectedToken) {
+      return res
+        .status(401)
+        .json({ error: "Invalid internal authentication token" });
+    }
+
+    const allHosts = await db.select().from(hosts);
+
+    const result = allHosts.map((host) => {
+      const tunnelConnections = host.tunnelConnections
+        ? JSON.parse(host.tunnelConnections)
+        : [];
+
+      return {
+        id: host.id,
+        userId: host.userId,
+        name: host.name || `${host.username}@${host.ip}`,
+        ip: host.ip,
+        port: host.port,
+        username: host.username,
+        password: host.autostartPassword || host.password,
+        key: host.autostartKey || host.key,
+        keyPassword: host.autostartKeyPassword || host.keyPassword,
+        autostartPassword: host.autostartPassword,
+        autostartKey: host.autostartKey,
+        autostartKeyPassword: host.autostartKeyPassword,
+        authType: host.authType,
+        keyType: host.keyType,
+        credentialId: host.credentialId,
+        enableTunnel: !!host.enableTunnel,
+        tunnelConnections: tunnelConnections,
+        pin: !!host.pin,
+        enableTerminal: !!host.enableTerminal,
+        enableFileManager: !!host.enableFileManager,
+        showTerminalInSidebar: !!host.showTerminalInSidebar,
+        showFileManagerInSidebar: !!host.showFileManagerInSidebar,
+        showTunnelInSidebar: !!host.showTunnelInSidebar,
+        showDockerInSidebar: !!host.showDockerInSidebar,
+        showServerStatsInSidebar: !!host.showServerStatsInSidebar,
+        defaultPath: host.defaultPath,
+        createdAt: host.createdAt,
+        updatedAt: host.updatedAt,
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    sshLogger.error("Failed to fetch all hosts for internal use", err);
+    res.status(500).json({ error: "Failed to fetch all hosts" });
+  }
+});
+
+/**
+ * @openapi
+ * /ssh/db/host:
+ *   post:
+ *     summary: Create SSH host
+ *     description: Creates a new SSH host configuration.
+ *     tags:
+ *       - SSH
+ *     responses:
+ *       200:
+ *         description: Host created successfully.
+ *       400:
+ *         description: Invalid SSH data.
+ *       500:
+ *         description: Failed to save SSH data.
+ */
+router.post(
+  "/db/host",
+  authenticateJWT,
+  requireDataAccess,
+  upload.single("key"),
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    let hostData: Record<string, unknown>;
+
+    if (req.headers["content-type"]?.includes("multipart/form-data")) {
+      if (req.body.data) {
+        try {
+          hostData = JSON.parse(req.body.data);
+        } catch (err) {
+          sshLogger.warn("Invalid JSON data in multipart request", {
+            operation: "host_create",
+            userId,
+            error: err,
+          });
+          return res.status(400).json({ error: "Invalid JSON data" });
+        }
+      } else {
+        sshLogger.warn("Missing data field in multipart request", {
+          operation: "host_create",
+          userId,
+        });
+        return res.status(400).json({ error: "Missing data field" });
+      }
+
+      if (req.file) {
+        hostData.key = req.file.buffer.toString("utf8");
+      }
+    } else {
+      hostData = req.body;
+    }
+
+    const {
+      connectionType,
+      name,
+      folder,
+      tags,
+      ip,
+      port,
+      username,
+      password,
+      authMethod,
+      authType,
+      credentialId,
+      key,
+      keyPassword,
+      keyType,
+      sudoPassword,
+      pin,
+      enableTerminal,
+      enableTunnel,
+      enableFileManager,
+      enableDocker,
+      showTerminalInSidebar,
+      showFileManagerInSidebar,
+      showTunnelInSidebar,
+      showDockerInSidebar,
+      showServerStatsInSidebar,
+      defaultPath,
+      tunnelConnections,
+      jumpHosts,
+      quickActions,
+      statsConfig,
+      dockerConfig,
+      terminalConfig,
+      forceKeyboardInteractive,
+      domain,
+      security,
+      ignoreCert,
+      guacamoleConfig,
+      notes,
+      useSocks5,
+      socks5Host,
+      socks5Port,
+      socks5Username,
+      socks5Password,
+      socks5ProxyChain,
+      overrideCredentialUsername,
+    } = hostData;
+    databaseLogger.info("Creating SSH host", {
+      operation: "host_create",
+      userId,
+      name,
+      ip,
+    });
+
+    if (
+      !isNonEmptyString(userId) ||
+      !isNonEmptyString(ip) ||
+      !isValidPort(port)
+    ) {
+      sshLogger.warn("Invalid SSH data input validation failed", {
+        operation: "host_create",
+        userId,
+        hasIp: !!ip,
+        port,
+        isValidPort: isValidPort(port),
+      });
+      return res.status(400).json({ error: "Invalid SSH data" });
+    }
+
+    const effectiveAuthType = authType || authMethod;
+    const effectiveConnectionType = connectionType || "ssh";
+    const sshDataObj: Record<string, unknown> = {
+      userId: userId,
+      connectionType: effectiveConnectionType,
+      name,
+      folder: folder || null,
+      tags: Array.isArray(tags) ? tags.join(",") : tags || "",
+      ip,
+      port,
+      username,
+      authType: effectiveAuthType,
+      credentialId: credentialId || null,
+      overrideCredentialUsername: overrideCredentialUsername ? 1 : 0,
+      pin: pin ? 1 : 0,
+      enableTerminal: enableTerminal ? 1 : 0,
+      enableTunnel: enableTunnel ? 1 : 0,
+      tunnelConnections: Array.isArray(tunnelConnections)
+        ? JSON.stringify(tunnelConnections)
+        : null,
+      jumpHosts: Array.isArray(jumpHosts) ? JSON.stringify(jumpHosts) : null,
+      quickActions: Array.isArray(quickActions)
+        ? JSON.stringify(quickActions)
+        : null,
+      enableFileManager: enableFileManager ? 1 : 0,
+      enableDocker: enableDocker ? 1 : 0,
+      showTerminalInSidebar: showTerminalInSidebar ? 1 : 0,
+      showFileManagerInSidebar: showFileManagerInSidebar ? 1 : 0,
+      showTunnelInSidebar: showTunnelInSidebar ? 1 : 0,
+      showDockerInSidebar: showDockerInSidebar ? 1 : 0,
+      showServerStatsInSidebar: showServerStatsInSidebar ? 1 : 0,
+      defaultPath: defaultPath || null,
+      statsConfig: statsConfig
+        ? typeof statsConfig === "string"
+          ? statsConfig
+          : JSON.stringify(statsConfig)
+        : null,
+      dockerConfig: dockerConfig
+        ? typeof dockerConfig === "string"
+          ? dockerConfig
+          : JSON.stringify(dockerConfig)
+        : null,
+      terminalConfig: terminalConfig
+        ? typeof terminalConfig === "string"
+          ? terminalConfig
+          : JSON.stringify(terminalConfig)
+        : null,
+      forceKeyboardInteractive: forceKeyboardInteractive ? "true" : "false",
+      domain: domain || null,
+      security: security || null,
+      ignoreCert: ignoreCert ? 1 : 0,
+      guacamoleConfig: guacamoleConfig ? JSON.stringify(guacamoleConfig) : null,
+      notes: notes || null,
+      sudoPassword: sudoPassword || null,
+      useSocks5: useSocks5 ? 1 : 0,
+      socks5Host: socks5Host || null,
+      socks5Port: socks5Port || null,
+      socks5Username: socks5Username || null,
+      socks5Password: socks5Password || null,
+      socks5ProxyChain: socks5ProxyChain
+        ? JSON.stringify(socks5ProxyChain)
+        : null,
+    };
+
+    // For non-SSH hosts (RDP, VNC, Telnet), always save password if provided
+    if (effectiveConnectionType !== "ssh") {
+      sshDataObj.password = password || null;
+      sshDataObj.key = null;
+      sshDataObj.keyPassword = null;
+      sshDataObj.keyType = null;
+    } else if (effectiveAuthType === "password") {
+      sshDataObj.password = password || null;
+      sshDataObj.key = null;
+      sshDataObj.keyPassword = null;
+      sshDataObj.keyType = null;
+    } else if (effectiveAuthType === "key") {
+      if (key && typeof key === "string") {
+        if (!key.includes("-----BEGIN") || !key.includes("-----END")) {
+          sshLogger.warn("Invalid SSH key format provided", {
+            operation: "host_create",
+            userId,
+            name,
+            ip,
+            port,
+          });
+          return res.status(400).json({
+            error: "Invalid SSH key format. Key must be in PEM format.",
+          });
+        }
+
+        const keyValidation = parseSSHKey(
+          key,
+          typeof keyPassword === "string" ? keyPassword : undefined,
+        );
+        if (!keyValidation.success) {
+          sshLogger.warn("SSH key validation failed", {
+            operation: "host_create",
+            userId,
+            name,
+            ip,
+            port,
+            error: keyValidation.error,
+          });
+          return res.status(400).json({
+            error: `Invalid SSH key: ${keyValidation.error || "Unable to parse key"}`,
+          });
+        }
+      }
+
+      sshDataObj.key = key || null;
+      sshDataObj.keyPassword = keyPassword || null;
+      sshDataObj.keyType = keyType;
+      sshDataObj.password = null;
+    } else {
+      sshDataObj.password = null;
+      sshDataObj.key = null;
+      sshDataObj.keyPassword = null;
+      sshDataObj.keyType = null;
+    }
+
+    try {
+      const result = await SimpleDBOps.insert(
+        hosts,
+        "ssh_data",
+        sshDataObj,
+        userId,
+      );
+
+      if (!result) {
+        sshLogger.warn("No host returned after creation", {
+          operation: "host_create",
+          userId,
+          name,
+          ip,
+          port,
+        });
+        return res.status(500).json({ error: "Failed to create host" });
+      }
+
+      const createdHost = result;
+      const baseHost = transformHostResponse(createdHost);
+
+      const resolvedHost =
+        (await resolveHostCredentials(baseHost, userId)) || baseHost;
+      databaseLogger.success("SSH host created", {
+        operation: "host_create_success",
+        userId,
+        hostId: createdHost.id as number,
+        name,
+      });
+
+      try {
+        const axios = (await import("axios")).default;
+        const statsPort = 30005;
+        await axios.post(
+          `http://localhost:${statsPort}/host-updated`,
+          { hostId: createdHost.id },
+          {
+            headers: {
+              Authorization: req.headers.authorization || "",
+              Cookie: req.headers.cookie || "",
+            },
+            timeout: 5000,
+          },
+        );
+      } catch (err) {
+        sshLogger.warn("Failed to notify stats server of new host", {
+          operation: "host_create",
+          hostId: createdHost.id as number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      res.json(resolvedHost);
+    } catch (err) {
+      sshLogger.error("Failed to save SSH host to database", err, {
+        operation: "host_create",
+        userId,
+        name,
+        ip,
+        port,
+        authType: effectiveAuthType,
+      });
+      res.status(500).json({ error: "Failed to save SSH data" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/quick-connect:
+ *   post:
+ *     summary: Create a temporary SSH connection without saving to database
+ *     description: Returns a temporary host configuration for immediate use
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - ip
+ *               - port
+ *               - username
+ *               - authType
+ *             properties:
+ *               ip:
+ *                 type: string
+ *                 description: SSH server IP or hostname
+ *               port:
+ *                 type: number
+ *                 description: SSH server port
+ *               username:
+ *                 type: string
+ *                 description: SSH username
+ *               authType:
+ *                 type: string
+ *                 enum: [password, key, credential]
+ *                 description: Authentication method
+ *               password:
+ *                 type: string
+ *                 description: Password (required if authType is password)
+ *               key:
+ *                 type: string
+ *                 description: SSH private key (required if authType is key)
+ *               keyPassword:
+ *                 type: string
+ *                 description: SSH key password (optional)
+ *               keyType:
+ *                 type: string
+ *                 description: SSH key type
+ *               credentialId:
+ *                 type: number
+ *                 description: Credential ID (required if authType is credential)
+ *               overrideCredentialUsername:
+ *                 type: boolean
+ *                 description: Use provided username instead of credential username
+ *     responses:
+ *       200:
+ *         description: Temporary host configuration created successfully
+ *       400:
+ *         description: Invalid request data
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: Credential not found
+ *       500:
+ *         description: Server error
+ */
+router.post(
+  "/quick-connect",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.userId;
+    const {
+      ip,
+      port,
+      username,
+      authType,
+      password,
+      key,
+      keyPassword,
+      keyType,
+      credentialId,
+      overrideCredentialUsername,
+    } = req.body;
+
+    if (
+      !isNonEmptyString(ip) ||
+      !isValidPort(port) ||
+      !isNonEmptyString(username) ||
+      !authType
+    ) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    try {
+      let resolvedPassword = password;
+      let resolvedKey = key;
+      let resolvedKeyPassword = keyPassword;
+      let resolvedKeyType = keyType;
+      let resolvedAuthType = authType;
+      let resolvedUsername = username;
+
+      if (authType === "credential" && credentialId) {
+        const credentials = await SimpleDBOps.select(
+          db
+            .select()
+            .from(sshCredentials)
+            .where(
+              and(
+                eq(sshCredentials.id, credentialId),
+                eq(sshCredentials.userId, userId),
+              ),
+            ),
+          "ssh_credentials",
+          userId,
+        );
+
+        if (!credentials || credentials.length === 0) {
+          return res.status(404).json({ error: "Credential not found" });
+        }
+
+        const cred = credentials[0];
+
+        resolvedPassword = cred.password as string | undefined;
+        resolvedKey = cred.privateKey as string | undefined;
+        resolvedKeyPassword = cred.keyPassword as string | undefined;
+        resolvedKeyType = cred.keyType as string | undefined;
+        resolvedAuthType = cred.authType as string | undefined;
+
+        if (!overrideCredentialUsername) {
+          resolvedUsername = cred.username as string;
+        }
+      }
+
+      const tempHost: Record<string, unknown> = {
+        id: -Date.now(),
+        userId: userId,
+        name: `${resolvedUsername}@${ip}:${port}`,
+        ip,
+        port: Number(port),
+        username: resolvedUsername,
+        folder: "",
+        tags: [],
+        pin: false,
+        authType: resolvedAuthType || authType,
+        password: resolvedPassword,
+        key: resolvedKey,
+        keyPassword: resolvedKeyPassword,
+        keyType: resolvedKeyType,
+        enableTerminal: true,
+        enableTunnel: false,
+        enableFileManager: true,
+        enableDocker: false,
+        showTerminalInSidebar: true,
+        showFileManagerInSidebar: false,
+        showTunnelInSidebar: false,
+        showDockerInSidebar: false,
+        showServerStatsInSidebar: false,
+        defaultPath: "/",
+        tunnelConnections: [],
+        jumpHosts: [],
+        quickActions: [],
+        statsConfig: {},
+        notes: "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      return res.status(200).json(tempHost);
+    } catch (error) {
+      sshLogger.error("Quick connect failed", error, {
+        operation: "quick_connect",
+        userId,
+        ip,
+        port,
+        authType,
+      });
+      return res
+        .status(500)
+        .json({ error: "Failed to create quick connection" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/db/host/{id}:
+ *   put:
+ *     summary: Update SSH host
+ *     description: Updates an existing SSH host configuration.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Host updated successfully.
+ *       400:
+ *         description: Invalid SSH data.
+ *       403:
+ *         description: Access denied.
+ *       404:
+ *         description: Host not found.
+ *       500:
+ *         description: Failed to update SSH data.
+ */
+router.put(
+  "/db/host/:id",
+  authenticateJWT,
+  requireDataAccess,
+  upload.single("key"),
+  async (req: Request, res: Response) => {
+    const hostId = Array.isArray(req.params.id)
+      ? req.params.id[0]
+      : req.params.id;
+    const userId = (req as AuthenticatedRequest).userId;
+    let hostData: Record<string, unknown>;
+
+    if (req.headers["content-type"]?.includes("multipart/form-data")) {
+      if (req.body.data) {
+        try {
+          hostData = JSON.parse(req.body.data);
+        } catch (err) {
+          sshLogger.warn("Invalid JSON data in multipart request", {
+            operation: "host_update",
+            hostId: parseInt(hostId),
+            userId,
+            error: err,
+          });
+          return res.status(400).json({ error: "Invalid JSON data" });
+        }
+      } else {
+        sshLogger.warn("Missing data field in multipart request", {
+          operation: "host_update",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(400).json({ error: "Missing data field" });
+      }
+
+      if (req.file) {
+        hostData.key = req.file.buffer.toString("utf8");
+      }
+    } else {
+      hostData = req.body;
+    }
+
+    const {
+      connectionType,
+      name,
+      folder,
+      tags,
+      ip,
+      port,
+      username,
+      password,
+      authMethod,
+      authType,
+      credentialId,
+      key,
+      keyPassword,
+      keyType,
+      sudoPassword,
+      pin,
+      enableTerminal,
+      enableTunnel,
+      enableFileManager,
+      enableDocker,
+      showTerminalInSidebar,
+      showFileManagerInSidebar,
+      showTunnelInSidebar,
+      showDockerInSidebar,
+      showServerStatsInSidebar,
+      defaultPath,
+      tunnelConnections,
+      jumpHosts,
+      quickActions,
+      statsConfig,
+      dockerConfig,
+      terminalConfig,
+      forceKeyboardInteractive,
+      domain,
+      security,
+      ignoreCert,
+      guacamoleConfig,
+      notes,
+      useSocks5,
+      socks5Host,
+      socks5Port,
+      socks5Username,
+      socks5Password,
+      socks5ProxyChain,
+      overrideCredentialUsername,
+    } = hostData;
+    databaseLogger.info("Updating SSH host", {
+      operation: "host_update",
+      userId,
+      hostId: parseInt(hostId),
+      changes: Object.keys(hostData),
+    });
+
+    if (
+      !isNonEmptyString(userId) ||
+      !isNonEmptyString(ip) ||
+      !isValidPort(port) ||
+      !hostId
+    ) {
+      sshLogger.warn("Invalid SSH data input validation failed for update", {
+        operation: "host_update",
+        hostId: parseInt(hostId),
+        userId,
+        hasIp: !!ip,
+        port,
+        isValidPort: isValidPort(port),
+      });
+      return res.status(400).json({ error: "Invalid SSH data" });
+    }
+
+    const effectiveAuthType = authType || authMethod;
+    const sshDataObj: Record<string, unknown> = {
+      connectionType: connectionType || "ssh",
+      name,
+      folder,
+      tags: Array.isArray(tags) ? tags.join(",") : tags || "",
+      ip,
+      port,
+      username,
+      authType: effectiveAuthType,
+      credentialId: credentialId || null,
+      overrideCredentialUsername: overrideCredentialUsername ? 1 : 0,
+      pin: pin ? 1 : 0,
+      enableTerminal: enableTerminal ? 1 : 0,
+      enableTunnel: enableTunnel ? 1 : 0,
+      tunnelConnections: Array.isArray(tunnelConnections)
+        ? JSON.stringify(tunnelConnections)
+        : null,
+      jumpHosts: Array.isArray(jumpHosts) ? JSON.stringify(jumpHosts) : null,
+      quickActions: Array.isArray(quickActions)
+        ? JSON.stringify(quickActions)
+        : null,
+      enableFileManager: enableFileManager ? 1 : 0,
+      enableDocker: enableDocker ? 1 : 0,
+      showTerminalInSidebar: showTerminalInSidebar ? 1 : 0,
+      showFileManagerInSidebar: showFileManagerInSidebar ? 1 : 0,
+      showTunnelInSidebar: showTunnelInSidebar ? 1 : 0,
+      showDockerInSidebar: showDockerInSidebar ? 1 : 0,
+      showServerStatsInSidebar: showServerStatsInSidebar ? 1 : 0,
+      defaultPath: defaultPath || null,
+      statsConfig: statsConfig
+        ? typeof statsConfig === "string"
+          ? statsConfig
+          : JSON.stringify(statsConfig)
+        : null,
+      dockerConfig: dockerConfig
+        ? typeof dockerConfig === "string"
+          ? dockerConfig
+          : JSON.stringify(dockerConfig)
+        : null,
+      terminalConfig: terminalConfig
+        ? typeof terminalConfig === "string"
+          ? terminalConfig
+          : JSON.stringify(terminalConfig)
+        : null,
+      forceKeyboardInteractive: forceKeyboardInteractive ? "true" : "false",
+      domain: domain || null,
+      security: security || null,
+      ignoreCert: ignoreCert ? 1 : 0,
+      guacamoleConfig: guacamoleConfig ? JSON.stringify(guacamoleConfig) : null,
+      notes: notes || null,
+      sudoPassword: sudoPassword || null,
+      useSocks5: useSocks5 ? 1 : 0,
+      socks5Host: socks5Host || null,
+      socks5Port: socks5Port || null,
+      socks5Username: socks5Username || null,
+      socks5Password: socks5Password || null,
+      socks5ProxyChain: socks5ProxyChain
+        ? JSON.stringify(socks5ProxyChain)
+        : null,
+    };
+
+    // For non-SSH hosts (RDP, VNC, Telnet), always save password if provided
+    if ((connectionType || "ssh") !== "ssh") {
+      if (password) {
+        sshDataObj.password = password;
+      }
+      sshDataObj.key = null;
+      sshDataObj.keyPassword = null;
+      sshDataObj.keyType = null;
+    } else if (effectiveAuthType === "password") {
+      if (password) {
+        sshDataObj.password = password;
+      }
+      sshDataObj.key = null;
+      sshDataObj.keyPassword = null;
+      sshDataObj.keyType = null;
+    } else if (effectiveAuthType === "key") {
+      if (key && typeof key === "string") {
+        if (!key.includes("-----BEGIN") || !key.includes("-----END")) {
+          sshLogger.warn("Invalid SSH key format provided", {
+            operation: "host_update",
+            hostId: parseInt(hostId),
+            userId,
+            name,
+            ip,
+            port,
+          });
+          return res.status(400).json({
+            error: "Invalid SSH key format. Key must be in PEM format.",
+          });
+        }
+
+        const keyValidation = parseSSHKey(
+          key,
+          typeof keyPassword === "string" ? keyPassword : undefined,
+        );
+        if (!keyValidation.success) {
+          sshLogger.warn("SSH key validation failed", {
+            operation: "host_update",
+            hostId: parseInt(hostId),
+            userId,
+            name,
+            ip,
+            port,
+            error: keyValidation.error,
+          });
+          return res.status(400).json({
+            error: `Invalid SSH key: ${keyValidation.error || "Unable to parse key"}`,
+          });
+        }
+
+        sshDataObj.key = key;
+      }
+      if (keyPassword !== undefined) {
+        sshDataObj.keyPassword = keyPassword || null;
+      }
+      if (keyType) {
+        sshDataObj.keyType = keyType;
+      }
+      sshDataObj.password = null;
+    } else {
+      sshDataObj.password = null;
+      sshDataObj.key = null;
+      sshDataObj.keyPassword = null;
+      sshDataObj.keyType = null;
+    }
+
+    try {
+      const accessInfo = await permissionManager.canAccessHost(
+        userId,
+        Number(hostId),
+        "write",
+      );
+
+      if (!accessInfo.hasAccess) {
+        sshLogger.warn("User does not have permission to update host", {
+          operation: "host_update",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      if (!accessInfo.isOwner) {
+        sshLogger.warn("Shared user attempted to update host (view-only)", {
+          operation: "host_update",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(403).json({
+          error: "Only the host owner can modify host configuration",
+        });
+      }
+
+      const hostRecord = await db
+        .select({
+          userId: hosts.userId,
+          credentialId: hosts.credentialId,
+          authType: hosts.authType,
+        })
+        .from(hosts)
+        .where(eq(hosts.id, Number(hostId)))
+        .limit(1);
+
+      if (hostRecord.length === 0) {
+        sshLogger.warn("Host not found for update", {
+          operation: "host_update",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(404).json({ error: "Host not found" });
+      }
+
+      const ownerId = hostRecord[0].userId;
+
+      if (
+        !accessInfo.isOwner &&
+        sshDataObj.credentialId !== undefined &&
+        sshDataObj.credentialId !== hostRecord[0].credentialId
+      ) {
+        return res.status(403).json({
+          error: "Only the host owner can change the credential",
+        });
+      }
+
+      if (
+        !accessInfo.isOwner &&
+        sshDataObj.authType !== undefined &&
+        sshDataObj.authType !== hostRecord[0].authType
+      ) {
+        return res.status(403).json({
+          error: "Only the host owner can change the authentication type",
+        });
+      }
+
+      if (sshDataObj.credentialId !== undefined) {
+        if (
+          hostRecord[0].credentialId !== null &&
+          sshDataObj.credentialId === null
+        ) {
+          await db
+            .delete(hostAccess)
+            .where(eq(hostAccess.hostId, Number(hostId)));
+        }
+      }
+
+      await SimpleDBOps.update(
+        hosts,
+        "ssh_data",
+        eq(hosts.id, Number(hostId)),
+        sshDataObj,
+        ownerId,
+      );
+
+      const updatedHosts = await SimpleDBOps.select(
+        db
+          .select()
+          .from(hosts)
+          .where(eq(hosts.id, Number(hostId))),
+        "ssh_data",
+        ownerId,
+      );
+
+      if (updatedHosts.length === 0) {
+        sshLogger.warn("Updated host not found after update", {
+          operation: "host_update",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(404).json({ error: "Host not found after update" });
+      }
+
+      const updatedHost = updatedHosts[0];
+      const baseHost = transformHostResponse(updatedHost);
+
+      const resolvedHost =
+        (await resolveHostCredentials(baseHost, userId)) || baseHost;
+      databaseLogger.success("SSH host updated", {
+        operation: "host_update_success",
+        userId,
+        hostId: parseInt(hostId),
+      });
+
+      try {
+        const axios = (await import("axios")).default;
+        const statsPort = 30005;
+        await axios.post(
+          `http://localhost:${statsPort}/host-updated`,
+          { hostId: parseInt(hostId) },
+          {
+            headers: {
+              Authorization: req.headers.authorization || "",
+              Cookie: req.headers.cookie || "",
+            },
+            timeout: 5000,
+          },
+        );
+      } catch (err) {
+        sshLogger.warn("Failed to notify stats server of host update", {
+          operation: "host_update",
+          hostId: parseInt(hostId),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      res.json(resolvedHost);
+    } catch (err) {
+      sshLogger.error("Failed to update SSH host in database", err, {
+        operation: "host_update",
+        hostId: parseInt(hostId),
+        userId,
+        name,
+        ip,
+        port,
+        authType: effectiveAuthType,
+      });
+      res.status(500).json({ error: "Failed to update SSH data" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/db/host:
+ *   get:
+ *     summary: Get all SSH hosts
+ *     description: Retrieves all SSH hosts for the authenticated user.
+ *     tags:
+ *       - SSH
+ *     responses:
+ *       200:
+ *         description: A list of SSH hosts.
+ *       400:
+ *         description: Invalid userId.
+ *       500:
+ *         description: Failed to fetch SSH data.
+ */
+router.get(
+  "/db/host",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    if (!isNonEmptyString(userId)) {
+      sshLogger.warn("Invalid userId for SSH data fetch", {
+        operation: "host_fetch",
+        userId,
+      });
+      return res.status(400).json({ error: "Invalid userId" });
+    }
+    try {
+      const now = new Date().toISOString();
+
+      const userRoleIds = await db
+        .select({ roleId: userRoles.roleId })
+        .from(userRoles)
+        .where(eq(userRoles.userId, userId));
+      const roleIds = userRoleIds.map((r) => r.roleId);
+
+      const rawData = await db
+        .select({
+          id: hosts.id,
+          userId: hosts.userId,
+          connectionType: hosts.connectionType,
+          name: hosts.name,
+          ip: hosts.ip,
+          port: hosts.port,
+          username: hosts.username,
+          folder: hosts.folder,
+          tags: hosts.tags,
+          pin: hosts.pin,
+          authType: hosts.authType,
+          password: hosts.password,
+          key: hosts.key,
+          keyPassword: hosts.keyPassword,
+          keyType: hosts.keyType,
+          enableTerminal: hosts.enableTerminal,
+          enableTunnel: hosts.enableTunnel,
+          tunnelConnections: hosts.tunnelConnections,
+          jumpHosts: hosts.jumpHosts,
+          enableFileManager: hosts.enableFileManager,
+          defaultPath: hosts.defaultPath,
+          autostartPassword: hosts.autostartPassword,
+          autostartKey: hosts.autostartKey,
+          autostartKeyPassword: hosts.autostartKeyPassword,
+          forceKeyboardInteractive: hosts.forceKeyboardInteractive,
+          statsConfig: hosts.statsConfig,
+          terminalConfig: hosts.terminalConfig,
+          sudoPassword: hosts.sudoPassword,
+          createdAt: hosts.createdAt,
+          updatedAt: hosts.updatedAt,
+          credentialId: hosts.credentialId,
+          overrideCredentialUsername: hosts.overrideCredentialUsername,
+          quickActions: hosts.quickActions,
+          notes: hosts.notes,
+          enableDocker: hosts.enableDocker,
+          showTerminalInSidebar: hosts.showTerminalInSidebar,
+          showFileManagerInSidebar: hosts.showFileManagerInSidebar,
+          showTunnelInSidebar: hosts.showTunnelInSidebar,
+          showDockerInSidebar: hosts.showDockerInSidebar,
+          showServerStatsInSidebar: hosts.showServerStatsInSidebar,
+          useSocks5: hosts.useSocks5,
+          socks5Host: hosts.socks5Host,
+          socks5Port: hosts.socks5Port,
+          socks5Username: hosts.socks5Username,
+          socks5Password: hosts.socks5Password,
+          socks5ProxyChain: hosts.socks5ProxyChain,
+          domain: hosts.domain,
+          security: hosts.security,
+          ignoreCert: hosts.ignoreCert,
+          guacamoleConfig: hosts.guacamoleConfig,
+
+          ownerId: hosts.userId,
+          isShared: sql<boolean>`${hostAccess.id} IS NOT NULL AND ${hosts.userId} != ${userId}`,
+          permissionLevel: hostAccess.permissionLevel,
+          expiresAt: hostAccess.expiresAt,
+        })
+        .from(hosts)
+        .leftJoin(
+          hostAccess,
+          and(
+            eq(hostAccess.hostId, hosts.id),
+            or(
+              eq(hostAccess.userId, userId),
+              roleIds.length > 0
+                ? inArray(hostAccess.roleId, roleIds)
+                : sql`false`,
+            ),
+            or(isNull(hostAccess.expiresAt), gte(hostAccess.expiresAt, now)),
+          ),
+        )
+        .where(
+          or(
+            eq(hosts.userId, userId),
+            and(
+              eq(hostAccess.userId, userId),
+              or(isNull(hostAccess.expiresAt), gte(hostAccess.expiresAt, now)),
+            ),
+            roleIds.length > 0
+              ? and(
+                  inArray(hostAccess.roleId, roleIds),
+                  or(
+                    isNull(hostAccess.expiresAt),
+                    gte(hostAccess.expiresAt, now),
+                  ),
+                )
+              : sql`false`,
+          ),
+        );
+
+      const ownHosts = rawData.filter((row) => row.userId === userId);
+      const sharedHosts = rawData.filter((row) => row.userId !== userId);
+
+      let decryptedOwnHosts: Record<string, unknown>[] = [];
+      try {
+        decryptedOwnHosts = await SimpleDBOps.select(
+          Promise.resolve(ownHosts),
+          "ssh_data",
+          userId,
+        );
+      } catch (decryptError) {
+        sshLogger.error("Failed to decrypt own hosts", decryptError, {
+          operation: "host_fetch_own_decrypt_failed",
+          userId,
+        });
+        decryptedOwnHosts = [];
+      }
+
+      if (decryptedOwnHosts.length === 0 && ownHosts.length > 0) {
+        sshLogger.warn("Using raw own hosts fallback after empty decrypt result", {
+          operation: "host_fetch_own_raw_fallback",
+          userId,
+          hostCount: ownHosts.length,
+        });
+        decryptedOwnHosts = ownHosts;
+      }
+
+      const sanitizedSharedHosts = sharedHosts;
+
+      const data = [...decryptedOwnHosts, ...sanitizedSharedHosts];
+
+      const result = await Promise.all(
+        data.map(async (row: Record<string, unknown>) => {
+          const baseHost = {
+            ...transformHostResponse(row),
+            isShared: !!row.isShared,
+            permissionLevel: row.permissionLevel || undefined,
+            sharedExpiresAt: row.expiresAt || undefined,
+          };
+
+          const resolved =
+            (await resolveHostCredentials(baseHost, userId)) || baseHost;
+          return resolved;
+        }),
+      );
+
+      res.json(result);
+    } catch (err) {
+      sshLogger.error("Failed to fetch SSH hosts from database", err, {
+        operation: "host_fetch",
+        userId,
+      });
+      res.status(500).json({ error: "Failed to fetch SSH data" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/db/host/{id}:
+ *   get:
+ *     summary: Get SSH host by ID
+ *     description: Retrieves a specific SSH host by its ID.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: The requested SSH host.
+ *       400:
+ *         description: Invalid userId or hostId.
+ *       404:
+ *         description: SSH host not found.
+ *       500:
+ *         description: Failed to fetch SSH host.
+ */
+router.get(
+  "/db/host/:id",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: Request, res: Response) => {
+    const hostId = Array.isArray(req.params.id)
+      ? req.params.id[0]
+      : req.params.id;
+    const userId = (req as AuthenticatedRequest).userId;
+
+    if (!isNonEmptyString(userId) || !hostId) {
+      sshLogger.warn("Invalid userId or hostId for SSH host fetch by ID", {
+        operation: "host_fetch_by_id",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      return res.status(400).json({ error: "Invalid userId or hostId" });
+    }
+    try {
+      const data = await SimpleDBOps.select(
+        db
+          .select()
+          .from(hosts)
+          .where(and(eq(hosts.id, Number(hostId)), eq(hosts.userId, userId))),
+        "ssh_data",
+        userId,
+      );
+
+      if (data.length === 0) {
+        sshLogger.warn("SSH host not found", {
+          operation: "host_fetch_by_id",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(404).json({ error: "SSH host not found" });
+      }
+
+      const host = data[0];
+      const result = transformHostResponse(host);
+
+      res.json((await resolveHostCredentials(result, userId)) || result);
+    } catch (err) {
+      sshLogger.error("Failed to fetch SSH host by ID from database", err, {
+        operation: "host_fetch_by_id",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      res.status(500).json({ error: "Failed to fetch SSH host" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/db/host/{id}/export:
+ *   get:
+ *     summary: Export SSH host
+ *     description: Exports a specific SSH host with decrypted credentials.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: The exported SSH host.
+ *       400:
+ *         description: Invalid userId or hostId.
+ *       404:
+ *         description: SSH host not found.
+ *       500:
+ *         description: Failed to export SSH host.
+ */
+router.get(
+  "/db/host/:id/export",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: Request, res: Response) => {
+    const hostId = Array.isArray(req.params.id)
+      ? req.params.id[0]
+      : req.params.id;
+    const userId = (req as AuthenticatedRequest).userId;
+
+    if (!isNonEmptyString(userId) || !hostId) {
+      return res.status(400).json({ error: "Invalid userId or hostId" });
+    }
+
+    try {
+      const hostResults = await SimpleDBOps.select(
+        db
+          .select()
+          .from(hosts)
+          .where(and(eq(hosts.id, Number(hostId)), eq(hosts.userId, userId))),
+        "ssh_data",
+        userId,
+      );
+
+      if (hostResults.length === 0) {
+        return res.status(404).json({ error: "SSH host not found" });
+      }
+
+      const host = hostResults[0];
+
+      const resolvedHost = (await resolveHostCredentials(host, userId)) || host;
+
+      const exportedConnectionType =
+        (resolvedHost.connectionType as string) || "ssh";
+      const isRemoteDesktop = ["rdp", "vnc", "telnet"].includes(
+        exportedConnectionType,
+      );
+
+      const baseExportData = {
+        connectionType: exportedConnectionType,
+        name: resolvedHost.name,
+        ip: resolvedHost.ip,
+        port: resolvedHost.port,
+        username: resolvedHost.username,
+        password: resolvedHost.password || null,
+        folder: resolvedHost.folder,
+        tags:
+          typeof resolvedHost.tags === "string"
+            ? resolvedHost.tags.split(",").filter(Boolean)
+            : resolvedHost.tags || [],
+        pin: !!resolvedHost.pin,
+        notes: resolvedHost.notes || null,
+      };
+
+      const exportData = isRemoteDesktop
+        ? {
+            ...baseExportData,
+            domain: resolvedHost.domain || null,
+            security: resolvedHost.security || null,
+            ignoreCert: !!resolvedHost.ignoreCert,
+            guacamoleConfig: resolvedHost.guacamoleConfig
+              ? JSON.parse(resolvedHost.guacamoleConfig as string)
+              : null,
+          }
+        : {
+            ...baseExportData,
+            authType: resolvedHost.authType,
+            key: resolvedHost.key || null,
+            keyPassword: resolvedHost.keyPassword || null,
+            keyType: resolvedHost.keyType || null,
+            credentialId: resolvedHost.credentialId || null,
+            overrideCredentialUsername:
+              !!resolvedHost.overrideCredentialUsername,
+            enableTerminal: !!resolvedHost.enableTerminal,
+            enableTunnel: !!resolvedHost.enableTunnel,
+            enableFileManager: !!resolvedHost.enableFileManager,
+            enableDocker: !!resolvedHost.enableDocker,
+            showTerminalInSidebar: !!resolvedHost.showTerminalInSidebar,
+            showFileManagerInSidebar: !!resolvedHost.showFileManagerInSidebar,
+            showTunnelInSidebar: !!resolvedHost.showTunnelInSidebar,
+            showDockerInSidebar: !!resolvedHost.showDockerInSidebar,
+            showServerStatsInSidebar: !!resolvedHost.showServerStatsInSidebar,
+            defaultPath: resolvedHost.defaultPath,
+            sudoPassword: resolvedHost.sudoPassword || null,
+            tunnelConnections: resolvedHost.tunnelConnections
+              ? JSON.parse(resolvedHost.tunnelConnections as string)
+              : [],
+            jumpHosts: resolvedHost.jumpHosts
+              ? JSON.parse(resolvedHost.jumpHosts as string)
+              : null,
+            quickActions: resolvedHost.quickActions
+              ? JSON.parse(resolvedHost.quickActions as string)
+              : null,
+            statsConfig: resolvedHost.statsConfig
+              ? JSON.parse(resolvedHost.statsConfig as string)
+              : null,
+            dockerConfig: resolvedHost.dockerConfig
+              ? JSON.parse(resolvedHost.dockerConfig as string)
+              : null,
+            terminalConfig: resolvedHost.terminalConfig
+              ? JSON.parse(resolvedHost.terminalConfig as string)
+              : null,
+            forceKeyboardInteractive:
+              resolvedHost.forceKeyboardInteractive === "true",
+            useSocks5: !!resolvedHost.useSocks5,
+            socks5Host: resolvedHost.socks5Host || null,
+            socks5Port: resolvedHost.socks5Port || null,
+            socks5Username: resolvedHost.socks5Username || null,
+            socks5Password: resolvedHost.socks5Password || null,
+            socks5ProxyChain: resolvedHost.socks5ProxyChain
+              ? JSON.parse(resolvedHost.socks5ProxyChain as string)
+              : null,
+          };
+
+      sshLogger.success("Host exported with decrypted credentials", {
+        operation: "host_export",
+        hostId: parseInt(hostId),
+        userId,
+      });
+
+      res.json(exportData);
+    } catch (err) {
+      sshLogger.error("Failed to export SSH host", err, {
+        operation: "host_export",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      res.status(500).json({ error: "Failed to export SSH host" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/db/host/{id}:
+ *   delete:
+ *     summary: Delete SSH host
+ *     description: Deletes an SSH host by its ID.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: SSH host deleted successfully.
+ *       400:
+ *         description: Invalid userId or id.
+ *       404:
+ *         description: SSH host not found.
+ *       500:
+ *         description: Failed to delete SSH host.
+ */
+router.delete(
+  "/db/host/:id",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const hostId = Array.isArray(req.params.id)
+      ? req.params.id[0]
+      : req.params.id;
+
+    if (!isNonEmptyString(userId) || !hostId) {
+      sshLogger.warn("Invalid userId or hostId for SSH host delete", {
+        operation: "host_delete",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      return res.status(400).json({ error: "Invalid userId or id" });
+    }
+    databaseLogger.info("Deleting SSH host", {
+      operation: "host_delete",
+      userId,
+      hostId: parseInt(hostId),
+    });
+    try {
+      const hostToDelete = await db
+        .select()
+        .from(hosts)
+        .where(and(eq(hosts.id, Number(hostId)), eq(hosts.userId, userId)));
+
+      if (hostToDelete.length === 0) {
+        sshLogger.warn("SSH host not found for deletion", {
+          operation: "host_delete",
+          hostId: parseInt(hostId),
+          userId,
+        });
+        return res.status(404).json({ error: "SSH host not found" });
+      }
+
+      const numericHostId = Number(hostId);
+
+      await db
+        .delete(fileManagerRecent)
+        .where(eq(fileManagerRecent.hostId, numericHostId));
+
+      await db
+        .delete(fileManagerPinned)
+        .where(eq(fileManagerPinned.hostId, numericHostId));
+
+      await db
+        .delete(fileManagerShortcuts)
+        .where(eq(fileManagerShortcuts.hostId, numericHostId));
+
+      await db
+        .delete(commandHistory)
+        .where(eq(commandHistory.hostId, numericHostId));
+
+      await db
+        .delete(sshCredentialUsage)
+        .where(eq(sshCredentialUsage.hostId, numericHostId));
+
+      await db
+        .delete(recentActivity)
+        .where(eq(recentActivity.hostId, numericHostId));
+
+      await db.delete(hostAccess).where(eq(hostAccess.hostId, numericHostId));
+
+      await db
+        .delete(sessionRecordings)
+        .where(eq(sessionRecordings.hostId, numericHostId));
+
+      await db
+        .delete(hosts)
+        .where(and(eq(hosts.id, numericHostId), eq(hosts.userId, userId)));
+
+      databaseLogger.success("SSH host deleted", {
+        operation: "host_delete_success",
+        userId,
+        hostId: parseInt(hostId),
+      });
+
+      try {
+        const axios = (await import("axios")).default;
+        const statsPort = 30005;
+        await axios.post(
+          `http://localhost:${statsPort}/host-deleted`,
+          { hostId: numericHostId },
+          {
+            headers: {
+              Authorization: req.headers.authorization || "",
+              Cookie: req.headers.cookie || "",
+            },
+            timeout: 5000,
+          },
+        );
+      } catch (err) {
+        sshLogger.warn("Failed to notify stats server of host deletion", {
+          operation: "host_delete",
+          hostId: numericHostId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      res.json({ message: "SSH host deleted" });
+    } catch (err) {
+      sshLogger.error("Failed to delete SSH host from database", err, {
+        operation: "host_delete",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      res.status(500).json({ error: "Failed to delete SSH host" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/recent:
+ *   get:
+ *     summary: Get recent files
+ *     description: Retrieves a list of recent files for a specific host.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: query
+ *         name: hostId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: A list of recent files.
+ *       400:
+ *         description: Invalid userId or hostId.
+ *       500:
+ *         description: Failed to fetch recent files.
+ */
+router.get(
+  "/file_manager/recent",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const hostIdQuery = Array.isArray(req.query.hostId)
+      ? req.query.hostId[0]
+      : req.query.hostId;
+    const hostId = hostIdQuery ? parseInt(hostIdQuery as string) : null;
+
+    if (!isNonEmptyString(userId)) {
+      sshLogger.warn("Invalid userId for recent files fetch");
+      return res.status(400).json({ error: "Invalid userId" });
+    }
+
+    if (!hostId) {
+      sshLogger.warn("Host ID is required for recent files fetch");
+      return res.status(400).json({ error: "Host ID is required" });
+    }
+
+    try {
+      const recentFiles = await db
+        .select()
+        .from(fileManagerRecent)
+        .where(
+          and(
+            eq(fileManagerRecent.userId, userId),
+            eq(fileManagerRecent.hostId, hostId),
+          ),
+        )
+        .orderBy(desc(fileManagerRecent.lastOpened))
+        .limit(20);
+
+      res.json(recentFiles);
+    } catch (err) {
+      sshLogger.error("Failed to fetch recent files", err);
+      res.status(500).json({ error: "Failed to fetch recent files" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/recent:
+ *   post:
+ *     summary: Add recent file
+ *     description: Adds a file to the list of recent files for a host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               path:
+ *                 type: string
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Recent file added.
+ *       400:
+ *         description: Invalid data.
+ *       500:
+ *         description: Failed to add recent file.
+ */
+router.post(
+  "/file_manager/recent",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, path, name } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !path) {
+      sshLogger.warn("Invalid data for recent file addition");
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      const existing = await db
+        .select()
+        .from(fileManagerRecent)
+        .where(
+          and(
+            eq(fileManagerRecent.userId, userId),
+            eq(fileManagerRecent.hostId, hostId),
+            eq(fileManagerRecent.path, path),
+          ),
+        );
+
+      if (existing.length > 0) {
+        await db
+          .update(fileManagerRecent)
+          .set({ lastOpened: new Date().toISOString() })
+          .where(eq(fileManagerRecent.id, existing[0].id));
+      } else {
+        await db.insert(fileManagerRecent).values({
+          userId,
+          hostId,
+          path,
+          name: name || path.split("/").pop() || "Unknown",
+          lastOpened: new Date().toISOString(),
+        });
+      }
+
+      res.json({ message: "Recent file added" });
+    } catch (err) {
+      sshLogger.error("Failed to add recent file", err);
+      res.status(500).json({ error: "Failed to add recent file" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/recent:
+ *   delete:
+ *     summary: Remove recent file
+ *     description: Removes a file from the list of recent files for a host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               path:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Recent file removed.
+ *       400:
+ *         description: Invalid data.
+ *       500:
+ *         description: Failed to remove recent file.
+ */
+router.delete(
+  "/file_manager/recent",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, path } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !path) {
+      sshLogger.warn("Invalid data for recent file deletion");
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      await db
+        .delete(fileManagerRecent)
+        .where(
+          and(
+            eq(fileManagerRecent.userId, userId),
+            eq(fileManagerRecent.hostId, hostId),
+            eq(fileManagerRecent.path, path),
+          ),
+        );
+
+      res.json({ message: "Recent file removed" });
+    } catch (err) {
+      sshLogger.error("Failed to remove recent file", err);
+      res.status(500).json({ error: "Failed to remove recent file" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/pinned:
+ *   get:
+ *     summary: Get pinned files
+ *     description: Retrieves a list of pinned files for a specific host.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: query
+ *         name: hostId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: A list of pinned files.
+ *       400:
+ *         description: Invalid userId or hostId.
+ *       500:
+ *         description: Failed to fetch pinned files.
+ */
+router.get(
+  "/file_manager/pinned",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const hostIdQuery = Array.isArray(req.query.hostId)
+      ? req.query.hostId[0]
+      : req.query.hostId;
+    const hostId = hostIdQuery ? parseInt(hostIdQuery as string) : null;
+
+    if (!isNonEmptyString(userId)) {
+      sshLogger.warn("Invalid userId for pinned files fetch");
+      return res.status(400).json({ error: "Invalid userId" });
+    }
+
+    if (!hostId) {
+      sshLogger.warn("Host ID is required for pinned files fetch");
+      return res.status(400).json({ error: "Host ID is required" });
+    }
+
+    try {
+      const pinnedFiles = await db
+        .select()
+        .from(fileManagerPinned)
+        .where(
+          and(
+            eq(fileManagerPinned.userId, userId),
+            eq(fileManagerPinned.hostId, hostId),
+          ),
+        )
+        .orderBy(desc(fileManagerPinned.pinnedAt));
+
+      res.json(pinnedFiles);
+    } catch (err) {
+      sshLogger.error("Failed to fetch pinned files", err);
+      res.status(500).json({ error: "Failed to fetch pinned files" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/pinned:
+ *   post:
+ *     summary: Add pinned file
+ *     description: Adds a file to the list of pinned files for a host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               path:
+ *                 type: string
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: File pinned.
+ *       400:
+ *         description: Invalid data.
+ *       409:
+ *         description: File already pinned.
+ *       500:
+ *         description: Failed to pin file.
+ */
+router.post(
+  "/file_manager/pinned",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, path, name } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !path) {
+      sshLogger.warn("Invalid data for pinned file addition");
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      const existing = await db
+        .select()
+        .from(fileManagerPinned)
+        .where(
+          and(
+            eq(fileManagerPinned.userId, userId),
+            eq(fileManagerPinned.hostId, hostId),
+            eq(fileManagerPinned.path, path),
+          ),
+        );
+
+      if (existing.length > 0) {
+        return res.status(409).json({ error: "File already pinned" });
+      }
+
+      await db.insert(fileManagerPinned).values({
+        userId,
+        hostId,
+        path,
+        name: name || path.split("/").pop() || "Unknown",
+        pinnedAt: new Date().toISOString(),
+      });
+
+      res.json({ message: "File pinned" });
+    } catch (err) {
+      sshLogger.error("Failed to pin file", err);
+      res.status(500).json({ error: "Failed to pin file" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/pinned:
+ *   delete:
+ *     summary: Remove pinned file
+ *     description: Removes a file from the list of pinned files for a host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               path:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Pinned file removed.
+ *       400:
+ *         description: Invalid data.
+ *       500:
+ *         description: Failed to remove pinned file.
+ */
+router.delete(
+  "/file_manager/pinned",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, path } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !path) {
+      sshLogger.warn("Invalid data for pinned file deletion");
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      await db
+        .delete(fileManagerPinned)
+        .where(
+          and(
+            eq(fileManagerPinned.userId, userId),
+            eq(fileManagerPinned.hostId, hostId),
+            eq(fileManagerPinned.path, path),
+          ),
+        );
+
+      res.json({ message: "Pinned file removed" });
+    } catch (err) {
+      sshLogger.error("Failed to remove pinned file", err);
+      res.status(500).json({ error: "Failed to remove pinned file" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/shortcuts:
+ *   get:
+ *     summary: Get shortcuts
+ *     description: Retrieves a list of shortcuts for a specific host.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: query
+ *         name: hostId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: A list of shortcuts.
+ *       400:
+ *         description: Invalid userId or hostId.
+ *       500:
+ *         description: Failed to fetch shortcuts.
+ */
+router.get(
+  "/file_manager/shortcuts",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const hostIdQuery = Array.isArray(req.query.hostId)
+      ? req.query.hostId[0]
+      : req.query.hostId;
+    const hostId = hostIdQuery ? parseInt(hostIdQuery as string) : null;
+
+    if (!isNonEmptyString(userId)) {
+      sshLogger.warn("Invalid userId for shortcuts fetch");
+      return res.status(400).json({ error: "Invalid userId" });
+    }
+
+    if (!hostId) {
+      sshLogger.warn("Host ID is required for shortcuts fetch");
+      return res.status(400).json({ error: "Host ID is required" });
+    }
+
+    try {
+      const shortcuts = await db
+        .select()
+        .from(fileManagerShortcuts)
+        .where(
+          and(
+            eq(fileManagerShortcuts.userId, userId),
+            eq(fileManagerShortcuts.hostId, hostId),
+          ),
+        )
+        .orderBy(desc(fileManagerShortcuts.createdAt));
+
+      res.json(shortcuts);
+    } catch (err) {
+      sshLogger.error("Failed to fetch shortcuts", err);
+      res.status(500).json({ error: "Failed to fetch shortcuts" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/shortcuts:
+ *   post:
+ *     summary: Add shortcut
+ *     description: Adds a shortcut for a specific host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               path:
+ *                 type: string
+ *               name:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Shortcut added.
+ *       400:
+ *         description: Invalid data.
+ *       409:
+ *         description: Shortcut already exists.
+ *       500:
+ *         description: Failed to add shortcut.
+ */
+router.post(
+  "/file_manager/shortcuts",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, path, name } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !path) {
+      sshLogger.warn("Invalid data for shortcut addition");
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      const existing = await db
+        .select()
+        .from(fileManagerShortcuts)
+        .where(
+          and(
+            eq(fileManagerShortcuts.userId, userId),
+            eq(fileManagerShortcuts.hostId, hostId),
+            eq(fileManagerShortcuts.path, path),
+          ),
+        );
+
+      if (existing.length > 0) {
+        return res.status(409).json({ error: "Shortcut already exists" });
+      }
+
+      await db.insert(fileManagerShortcuts).values({
+        userId,
+        hostId,
+        path,
+        name: name || path.split("/").pop() || "Unknown",
+        createdAt: new Date().toISOString(),
+      });
+
+      res.json({ message: "Shortcut added" });
+    } catch (err) {
+      sshLogger.error("Failed to add shortcut", err);
+      res.status(500).json({ error: "Failed to add shortcut" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/file_manager/shortcuts:
+ *   delete:
+ *     summary: Remove shortcut
+ *     description: Removes a shortcut for a specific host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               path:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Shortcut removed.
+ *       400:
+ *         description: Invalid data.
+ *       500:
+ *         description: Failed to remove shortcut.
+ */
+router.delete(
+  "/file_manager/shortcuts",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, path } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !path) {
+      sshLogger.warn("Invalid data for shortcut deletion");
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      await db
+        .delete(fileManagerShortcuts)
+        .where(
+          and(
+            eq(fileManagerShortcuts.userId, userId),
+            eq(fileManagerShortcuts.hostId, hostId),
+            eq(fileManagerShortcuts.path, path),
+          ),
+        );
+
+      res.json({ message: "Shortcut removed" });
+    } catch (err) {
+      sshLogger.error("Failed to remove shortcut", err);
+      res.status(500).json({ error: "Failed to remove shortcut" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/command-history/{hostId}:
+ *   get:
+ *     summary: Get command history
+ *     description: Retrieves the command history for a specific host.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: hostId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: A list of commands.
+ *       400:
+ *         description: Invalid userId or hostId.
+ *       500:
+ *         description: Failed to fetch command history.
+ */
+router.get(
+  "/command-history/:hostId",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const hostIdParam = Array.isArray(req.params.hostId)
+      ? req.params.hostId[0]
+      : req.params.hostId;
+    const hostId = parseInt(hostIdParam, 10);
+
+    if (!isNonEmptyString(userId) || !hostId) {
+      sshLogger.warn("Invalid userId or hostId for command history fetch", {
+        operation: "command_history_fetch",
+        hostId,
+        userId,
+      });
+      return res.status(400).json({ error: "Invalid userId or hostId" });
+    }
+
+    try {
+      const history = await db
+        .select({
+          id: commandHistory.id,
+          command: commandHistory.command,
+        })
+        .from(commandHistory)
+        .where(
+          and(
+            eq(commandHistory.userId, userId),
+            eq(commandHistory.hostId, hostId),
+          ),
+        )
+        .orderBy(desc(commandHistory.executedAt))
+        .limit(200);
+
+      res.json(history.map((h) => h.command));
+    } catch (err) {
+      sshLogger.error("Failed to fetch command history from database", err, {
+        operation: "command_history_fetch",
+        hostId,
+        userId,
+      });
+      res.status(500).json({ error: "Failed to fetch command history" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/command-history:
+ *   delete:
+ *     summary: Delete command from history
+ *     description: Deletes a specific command from the history of a host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostId:
+ *                 type: integer
+ *               command:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Command deleted from history.
+ *       400:
+ *         description: Invalid data.
+ *       500:
+ *         description: Failed to delete command.
+ */
+router.delete(
+  "/command-history",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostId, command } = req.body;
+
+    if (!isNonEmptyString(userId) || !hostId || !command) {
+      sshLogger.warn("Invalid data for command history deletion", {
+        operation: "command_history_delete",
+        hostId,
+        userId,
+      });
+      return res.status(400).json({ error: "Invalid data" });
+    }
+
+    try {
+      await db
+        .delete(commandHistory)
+        .where(
+          and(
+            eq(commandHistory.userId, userId),
+            eq(commandHistory.hostId, hostId),
+            eq(commandHistory.command, command),
+          ),
+        );
+
+      res.json({ message: "Command deleted from history" });
+    } catch (err) {
+      sshLogger.error("Failed to delete command from history", err, {
+        operation: "command_history_delete",
+        hostId,
+        userId,
+        command,
+      });
+      res.status(500).json({ error: "Failed to delete command" });
+    }
+  },
+);
+
+async function resolveHostCredentials(
+  host: Record<string, unknown>,
+  requestingUserId?: string,
+): Promise<Record<string, unknown>> {
+  try {
+    if (host.credentialId && (host.userId || host.ownerId)) {
+      const credentialId = host.credentialId as number;
+      const ownerId = (host.ownerId || host.userId) as string;
+
+      if (requestingUserId && requestingUserId !== ownerId) {
+        try {
+          const { SharedCredentialManager } =
+            await import("../../utils/shared-credential-manager.js");
+          const sharedCredManager = SharedCredentialManager.getInstance();
+          const sharedCred = await sharedCredManager.getSharedCredentialForUser(
+            host.id as number,
+            requestingUserId,
+          );
+
+          if (sharedCred) {
+            const resolvedHost: Record<string, unknown> = {
+              ...host,
+              password: sharedCred.password,
+              key: sharedCred.key,
+              keyPassword: sharedCred.keyPassword,
+              keyType: sharedCred.keyType,
+            };
+
+            if (!host.overrideCredentialUsername) {
+              resolvedHost.username = sharedCred.username;
+            }
+
+            return resolvedHost;
+          }
+        } catch (sharedCredError) {
+          sshLogger.warn(
+            "Failed to get shared credential, falling back to owner credential",
+            {
+              operation: "resolve_shared_credential_fallback",
+              hostId: host.id as number,
+              requestingUserId,
+              error:
+                sharedCredError instanceof Error
+                  ? sharedCredError.message
+                  : "Unknown error",
+            },
+          );
+        }
+      }
+
+      const credentials = await SimpleDBOps.select(
+        db
+          .select()
+          .from(sshCredentials)
+          .where(
+            and(
+              eq(sshCredentials.id, credentialId),
+              eq(sshCredentials.userId, ownerId),
+            ),
+          ),
+        "ssh_credentials",
+        ownerId,
+      );
+
+      if (credentials.length > 0) {
+        const credential = credentials[0];
+        const resolvedHost: Record<string, unknown> = {
+          ...host,
+          password: credential.password,
+          key: credential.key,
+          keyPassword: credential.keyPassword,
+          keyType: credential.keyType,
+        };
+
+        if (!host.overrideCredentialUsername) {
+          resolvedHost.username = credential.username;
+        }
+
+        return resolvedHost;
+      }
+    }
+
+    return { ...host };
+  } catch (error) {
+    sshLogger.warn(
+      `Failed to resolve credentials for host ${host.id}: ${error instanceof Error ? error.message : "Unknown error"}`,
+    );
+    return host;
+  }
+}
+
+/**
+ * @openapi
+ * /ssh/folders/rename:
+ *   put:
+ *     summary: Rename folder
+ *     description: Renames a folder for SSH hosts and credentials.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               oldName:
+ *                 type: string
+ *               newName:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Folder renamed successfully.
+ *       400:
+ *         description: Old name and new name are required.
+ *       500:
+ *         description: Failed to rename folder.
+ */
+router.put(
+  "/folders/rename",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { oldName, newName } = req.body;
+
+    if (!isNonEmptyString(userId) || !oldName || !newName) {
+      sshLogger.warn("Invalid data for folder rename");
+      return res
+        .status(400)
+        .json({ error: "Old name and new name are required" });
+    }
+
+    if (oldName === newName) {
+      return res.json({ message: "Folder name unchanged" });
+    }
+
+    try {
+      const updatedHosts = await SimpleDBOps.update(
+        hosts,
+        "ssh_data",
+        and(eq(hosts.userId, userId), eq(hosts.folder, oldName)),
+        {
+          folder: newName,
+          updatedAt: new Date().toISOString(),
+        },
+        userId,
+      );
+
+      const updatedCredentials = await db
+        .update(sshCredentials)
+        .set({
+          folder: newName,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(
+          and(
+            eq(sshCredentials.userId, userId),
+            eq(sshCredentials.folder, oldName),
+          ),
+        )
+        .returning();
+
+      DatabaseSaveTrigger.triggerSave("folder_rename");
+
+      await db
+        .update(sshFolders)
+        .set({
+          name: newName,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(
+          and(eq(sshFolders.userId, userId), eq(sshFolders.name, oldName)),
+        );
+
+      res.json({
+        message: "Folder renamed successfully",
+        updatedHosts: updatedHosts.length,
+        updatedCredentials: updatedCredentials.length,
+      });
+    } catch (err) {
+      sshLogger.error("Failed to rename folder", err, {
+        operation: "folder_rename",
+        userId,
+        oldName,
+        newName,
+      });
+      res.status(500).json({ error: "Failed to rename folder" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/folders:
+ *   get:
+ *     summary: Get all folders
+ *     description: Retrieves all folders for the authenticated user.
+ *     tags:
+ *       - SSH
+ *     responses:
+ *       200:
+ *         description: A list of folders.
+ *       400:
+ *         description: Invalid user ID.
+ *       500:
+ *         description: Failed to fetch folders.
+ */
+router.get("/folders", authenticateJWT, async (req: Request, res: Response) => {
+  const userId = (req as AuthenticatedRequest).userId;
+
+  if (!isNonEmptyString(userId)) {
+    return res.status(400).json({ error: "Invalid user ID" });
+  }
+
+  try {
+    const folders = await db
+      .select()
+      .from(sshFolders)
+      .where(eq(sshFolders.userId, userId));
+
+    res.json(folders);
+  } catch (err) {
+    sshLogger.error("Failed to fetch folders", err, {
+      operation: "fetch_folders",
+      userId,
+    });
+    res.status(500).json({ error: "Failed to fetch folders" });
+  }
+});
+
+/**
+ * @openapi
+ * /ssh/folders/metadata:
+ *   put:
+ *     summary: Update folder metadata
+ *     description: Updates the metadata (color, icon) of a folder.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               color:
+ *                 type: string
+ *               icon:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Folder metadata updated successfully.
+ *       400:
+ *         description: Folder name is required.
+ *       500:
+ *         description: Failed to update folder metadata.
+ */
+router.put(
+  "/folders/metadata",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { name, color, icon } = req.body;
+
+    if (!isNonEmptyString(userId) || !name) {
+      return res.status(400).json({ error: "Folder name is required" });
+    }
+
+    try {
+      const existing = await db
+        .select()
+        .from(sshFolders)
+        .where(and(eq(sshFolders.userId, userId), eq(sshFolders.name, name)))
+        .limit(1);
+
+      if (existing.length > 0) {
+        databaseLogger.info("Updating SSH folder", {
+          operation: "folder_update",
+          userId,
+          folderId: existing[0].id,
+        });
+        await db
+          .update(sshFolders)
+          .set({
+            color,
+            icon,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(and(eq(sshFolders.userId, userId), eq(sshFolders.name, name)));
+      } else {
+        databaseLogger.info("Creating SSH folder", {
+          operation: "folder_create",
+          userId,
+          name,
+        });
+        await db.insert(sshFolders).values({
+          userId,
+          name,
+          color,
+          icon,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      DatabaseSaveTrigger.triggerSave("folder_metadata_update");
+
+      res.json({ message: "Folder metadata updated successfully" });
+    } catch (err) {
+      sshLogger.error("Failed to update folder metadata", err, {
+        operation: "update_folder_metadata",
+        userId,
+        name,
+      });
+      res.status(500).json({ error: "Failed to update folder metadata" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/folders/{name}/hosts:
+ *   delete:
+ *     summary: Delete all hosts in folder
+ *     description: Deletes all SSH hosts within a specific folder.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Hosts deleted successfully.
+ *       400:
+ *         description: Invalid folder name.
+ *       500:
+ *         description: Failed to delete hosts in folder.
+ */
+router.delete(
+  "/folders/:name/hosts",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const folderName = Array.isArray(req.params.name)
+      ? req.params.name[0]
+      : req.params.name;
+
+    if (!isNonEmptyString(userId) || !folderName) {
+      return res.status(400).json({ error: "Invalid folder name" });
+    }
+    databaseLogger.info("Deleting SSH folder", {
+      operation: "folder_delete",
+      userId,
+      folderId: folderName,
+    });
+
+    try {
+      const hostsToDelete = await db
+        .select()
+        .from(hosts)
+        .where(and(eq(hosts.userId, userId), eq(hosts.folder, folderName)));
+
+      if (hostsToDelete.length === 0) {
+        return res.json({
+          message: "No hosts found in folder",
+          deletedCount: 0,
+        });
+      }
+
+      const hostIds = hostsToDelete.map((host) => host.id);
+
+      if (hostIds.length > 0) {
+        await db
+          .delete(fileManagerRecent)
+          .where(inArray(fileManagerRecent.hostId, hostIds));
+
+        await db
+          .delete(fileManagerPinned)
+          .where(inArray(fileManagerPinned.hostId, hostIds));
+
+        await db
+          .delete(fileManagerShortcuts)
+          .where(inArray(fileManagerShortcuts.hostId, hostIds));
+
+        await db
+          .delete(commandHistory)
+          .where(inArray(commandHistory.hostId, hostIds));
+
+        await db
+          .delete(sshCredentialUsage)
+          .where(inArray(sshCredentialUsage.hostId, hostIds));
+
+        await db
+          .delete(recentActivity)
+          .where(inArray(recentActivity.hostId, hostIds));
+
+        await db.delete(hostAccess).where(inArray(hostAccess.hostId, hostIds));
+
+        await db
+          .delete(sessionRecordings)
+          .where(inArray(sessionRecordings.hostId, hostIds));
+      }
+
+      await db
+        .delete(hosts)
+        .where(and(eq(hosts.userId, userId), eq(hosts.folder, folderName)));
+
+      await db
+        .delete(sshFolders)
+        .where(
+          and(eq(sshFolders.userId, userId), eq(sshFolders.name, folderName)),
+        );
+
+      DatabaseSaveTrigger.triggerSave("folder_hosts_delete");
+
+      try {
+        const axios = (await import("axios")).default;
+        const statsPort = 30005;
+        for (const host of hostsToDelete) {
+          try {
+            await axios.post(
+              `http://localhost:${statsPort}/host-deleted`,
+              { hostId: host.id },
+              {
+                headers: {
+                  Authorization: req.headers.authorization || "",
+                  Cookie: req.headers.cookie || "",
+                },
+                timeout: 5000,
+              },
+            );
+          } catch (err) {
+            sshLogger.warn("Failed to notify stats server of host deletion", {
+              operation: "folder_hosts_delete",
+              hostId: host.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      } catch (err) {
+        sshLogger.warn("Failed to notify stats server of folder deletion", {
+          operation: "folder_hosts_delete",
+          folderName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      res.json({
+        message: "All hosts in folder deleted successfully",
+        deletedCount: hostsToDelete.length,
+      });
+    } catch (err) {
+      sshLogger.error("Failed to delete hosts in folder", err, {
+        operation: "delete_folder_hosts",
+        userId,
+        folderName,
+      });
+      res.status(500).json({ error: "Failed to delete hosts in folder" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/bulk-import:
+ *   post:
+ *     summary: Bulk import SSH hosts
+ *     description: Bulk imports multiple SSH hosts.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hosts:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *     responses:
+ *       200:
+ *         description: Import completed.
+ *       400:
+ *         description: Invalid request body.
+ */
+
+/**
+ * @swagger
+ * /ssh/bulk-update:
+ *   patch:
+ *     summary: Bulk update partial fields on multiple SSH hosts
+ *     tags: [SSH]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               hostIds:
+ *                 type: array
+ *                 items:
+ *                   type: number
+ *               updates:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Bulk update completed.
+ *       400:
+ *         description: Invalid request body.
+ */
+router.patch(
+  "/bulk-update",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hostIds, updates } = req.body;
+
+    if (!Array.isArray(hostIds) || hostIds.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "hostIds array is required and must not be empty" });
+    }
+
+    if (hostIds.length > 1000) {
+      return res
+        .status(400)
+        .json({ error: "Maximum 1000 hosts allowed per bulk update" });
+    }
+
+    if (
+      !updates ||
+      typeof updates !== "object" ||
+      Object.keys(updates).length === 0
+    ) {
+      return res.status(400).json({
+        error: "updates object is required and must contain at least one field",
+      });
+    }
+
+    try {
+      const ownedHosts = await db
+        .select({ id: hosts.id, statsConfig: hosts.statsConfig })
+        .from(hosts)
+        .where(and(inArray(hosts.id, hostIds), eq(hosts.userId, userId)));
+
+      const ownedIds = ownedHosts.map((h) => h.id);
+      const unauthorizedIds = hostIds.filter(
+        (id: number) => !ownedIds.includes(id),
+      );
+
+      if (ownedIds.length === 0) {
+        return res.status(404).json({ error: "No matching hosts found" });
+      }
+
+      const errors: string[] = [];
+      if (unauthorizedIds.length > 0) {
+        errors.push(`${unauthorizedIds.length} host(s) not found or not owned`);
+      }
+
+      const simpleUpdates: Record<string, unknown> = {};
+      if (typeof updates.pin === "boolean") simpleUpdates.pin = updates.pin;
+      if (typeof updates.folder === "string")
+        simpleUpdates.folder = updates.folder || null;
+      if (typeof updates.enableTerminal === "boolean")
+        simpleUpdates.enableTerminal = updates.enableTerminal;
+      if (typeof updates.enableTunnel === "boolean")
+        simpleUpdates.enableTunnel = updates.enableTunnel;
+      if (typeof updates.enableFileManager === "boolean")
+        simpleUpdates.enableFileManager = updates.enableFileManager;
+      if (typeof updates.enableDocker === "boolean")
+        simpleUpdates.enableDocker = updates.enableDocker;
+
+      if (Object.keys(simpleUpdates).length > 0) {
+        await db
+          .update(hosts)
+          .set(simpleUpdates)
+          .where(and(inArray(hosts.id, ownedIds), eq(hosts.userId, userId)));
+      }
+
+      if (updates.statsConfig && typeof updates.statsConfig === "object") {
+        for (const host of ownedHosts) {
+          try {
+            const existing = host.statsConfig
+              ? JSON.parse(host.statsConfig as string)
+              : {};
+            const merged = { ...existing, ...updates.statsConfig };
+            await db
+              .update(hosts)
+              .set({ statsConfig: JSON.stringify(merged) })
+              .where(and(eq(hosts.id, host.id), eq(hosts.userId, userId)));
+          } catch (e) {
+            errors.push(`Failed to update statsConfig for host ${host.id}`);
+          }
+        }
+      }
+
+      DatabaseSaveTrigger.triggerSave("bulk_update");
+
+      return res.json({
+        updated: ownedIds.length,
+        failed: unauthorizedIds.length,
+        errors,
+      });
+    } catch (error) {
+      sshLogger.error("Failed to bulk update hosts:", error);
+      return res.status(500).json({ error: "Failed to bulk update hosts" });
+    }
+  },
+);
+
+router.post(
+  "/bulk-import",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { hosts: hostsToImport, overwrite } = req.body;
+
+    if (!Array.isArray(hostsToImport) || hostsToImport.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Hosts array is required and must not be empty" });
+    }
+
+    if (hostsToImport.length > 100) {
+      return res
+        .status(400)
+        .json({ error: "Maximum 100 hosts allowed per import" });
+    }
+
+    const results = {
+      success: 0,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [] as string[],
+    };
+
+    let existingHostMap: Map<string, { id: number }> | undefined;
+    if (overwrite) {
+      try {
+        const allHosts = await SimpleDBOps.select<Record<string, unknown>>(
+          db.select().from(hosts).where(eq(hosts.userId, userId)),
+          "ssh_data",
+          userId,
+        );
+        existingHostMap = new Map();
+        for (const h of allHosts) {
+          const key = `${h.ip}:${h.port}:${h.username}`;
+          existingHostMap.set(key, { id: h.id as number });
+        }
+      } catch {
+        existingHostMap = undefined;
+      }
+    }
+
+    for (let i = 0; i < hostsToImport.length; i++) {
+      const hostData = hostsToImport[i];
+
+      try {
+        const effectiveConnectionType = hostData.connectionType || "ssh";
+
+        if (!isNonEmptyString(hostData.ip) || !isValidPort(hostData.port)) {
+          results.failed++;
+          results.errors.push(
+            `Host ${i + 1}: Missing required fields (ip, port)`,
+          );
+          continue;
+        }
+
+        if (
+          effectiveConnectionType === "ssh" &&
+          !isNonEmptyString(hostData.username)
+        ) {
+          results.failed++;
+          results.errors.push(
+            `Host ${i + 1}: Username required for SSH connections`,
+          );
+          continue;
+        }
+
+        if (
+          effectiveConnectionType === "ssh" &&
+          hostData.authType &&
+          !["password", "key", "credential", "none", "opkssh"].includes(
+            hostData.authType,
+          )
+        ) {
+          results.failed++;
+          results.errors.push(
+            `Host ${i + 1}: Invalid authType. Must be 'password', 'key', 'credential', 'none', or 'opkssh'`,
+          );
+          continue;
+        }
+
+        if (
+          effectiveConnectionType === "ssh" &&
+          hostData.authType === "password" &&
+          !isNonEmptyString(hostData.password)
+        ) {
+          results.failed++;
+          results.errors.push(
+            `Host ${i + 1}: Password required for password authentication`,
+          );
+          continue;
+        }
+
+        if (
+          effectiveConnectionType === "ssh" &&
+          hostData.authType === "key" &&
+          !isNonEmptyString(hostData.key)
+        ) {
+          results.failed++;
+          results.errors.push(
+            `Host ${i + 1}: Key required for key authentication`,
+          );
+          continue;
+        }
+
+        if (
+          effectiveConnectionType === "ssh" &&
+          hostData.authType === "credential" &&
+          !hostData.credentialId
+        ) {
+          results.failed++;
+          results.errors.push(
+            `Host ${i + 1}: credentialId required for credential authentication`,
+          );
+          continue;
+        }
+
+        const sshDataObj: Record<string, unknown> = {
+          userId: userId,
+          connectionType: effectiveConnectionType,
+          name: hostData.name || `${hostData.username || ""}@${hostData.ip}`,
+          folder: hostData.folder || "Default",
+          tags: Array.isArray(hostData.tags) ? hostData.tags.join(",") : "",
+          ip: hostData.ip,
+          port: hostData.port,
+          username: hostData.username || null,
+          pin: hostData.pin || false,
+          enableTerminal: hostData.enableTerminal !== false,
+          enableTunnel: hostData.enableTunnel !== false,
+          enableFileManager: hostData.enableFileManager !== false,
+          enableDocker: hostData.enableDocker || false,
+          showTerminalInSidebar: hostData.showTerminalInSidebar ? 1 : 0,
+          showFileManagerInSidebar: hostData.showFileManagerInSidebar ? 1 : 0,
+          showTunnelInSidebar: hostData.showTunnelInSidebar ? 1 : 0,
+          showDockerInSidebar: hostData.showDockerInSidebar ? 1 : 0,
+          showServerStatsInSidebar: hostData.showServerStatsInSidebar ? 1 : 0,
+          defaultPath: hostData.defaultPath || "/",
+          sudoPassword: hostData.sudoPassword || null,
+          tunnelConnections: hostData.tunnelConnections
+            ? JSON.stringify(hostData.tunnelConnections)
+            : "[]",
+          jumpHosts: hostData.jumpHosts
+            ? JSON.stringify(hostData.jumpHosts)
+            : null,
+          quickActions: hostData.quickActions
+            ? JSON.stringify(hostData.quickActions)
+            : null,
+          statsConfig: hostData.statsConfig
+            ? JSON.stringify(hostData.statsConfig)
+            : null,
+          dockerConfig: hostData.dockerConfig
+            ? JSON.stringify(hostData.dockerConfig)
+            : null,
+          terminalConfig: hostData.terminalConfig
+            ? JSON.stringify(hostData.terminalConfig)
+            : null,
+          forceKeyboardInteractive: hostData.forceKeyboardInteractive
+            ? "true"
+            : "false",
+          notes: hostData.notes || null,
+          useSocks5: hostData.useSocks5 ? 1 : 0,
+          socks5Host: hostData.socks5Host || null,
+          socks5Port: hostData.socks5Port || null,
+          socks5Username: hostData.socks5Username || null,
+          socks5Password: hostData.socks5Password || null,
+          socks5ProxyChain: hostData.socks5ProxyChain
+            ? JSON.stringify(hostData.socks5ProxyChain)
+            : null,
+          overrideCredentialUsername: hostData.overrideCredentialUsername
+            ? 1
+            : 0,
+          updatedAt: new Date().toISOString(),
+        };
+
+        if (effectiveConnectionType !== "ssh") {
+          sshDataObj.password = hostData.password || null;
+          sshDataObj.authType = "password";
+          sshDataObj.credentialId = null;
+          sshDataObj.key = null;
+          sshDataObj.keyPassword = null;
+          sshDataObj.keyType = null;
+          sshDataObj.domain = hostData.domain || null;
+          sshDataObj.security = hostData.security || null;
+          sshDataObj.ignoreCert = hostData.ignoreCert ? 1 : 0;
+          sshDataObj.guacamoleConfig = hostData.guacamoleConfig
+            ? JSON.stringify(hostData.guacamoleConfig)
+            : null;
+        } else {
+          sshDataObj.password =
+            hostData.authType === "password" ? hostData.password : null;
+          sshDataObj.authType = hostData.authType || "password";
+          sshDataObj.credentialId =
+            hostData.authType === "credential" ? hostData.credentialId : null;
+          sshDataObj.key = hostData.authType === "key" ? hostData.key : null;
+          sshDataObj.keyPassword =
+            hostData.authType === "key" ? hostData.keyPassword || null : null;
+          sshDataObj.keyType =
+            hostData.authType === "key" ? hostData.keyType || "auto" : null;
+          sshDataObj.domain = null;
+          sshDataObj.security = null;
+          sshDataObj.ignoreCert = 0;
+          sshDataObj.guacamoleConfig = null;
+        }
+
+        const lookupKey = `${hostData.ip}:${hostData.port}:${hostData.username}`;
+        const existing = existingHostMap?.get(lookupKey);
+
+        if (existing) {
+          await SimpleDBOps.update(
+            hosts,
+            "ssh_data",
+            eq(hosts.id, existing.id),
+            sshDataObj,
+            userId,
+          );
+          results.updated++;
+        } else {
+          sshDataObj.createdAt = new Date().toISOString();
+          await SimpleDBOps.insert(hosts, "ssh_data", sshDataObj, userId);
+          results.success++;
+        }
+      } catch (error) {
+        results.failed++;
+        results.errors.push(
+          `Host ${i + 1}: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+      }
+    }
+
+    res.json({
+      message: `Import completed: ${results.success} created, ${results.updated} updated, ${results.failed} failed`,
+      success: results.success,
+      updated: results.updated,
+      skipped: results.skipped,
+      failed: results.failed,
+      errors: results.errors,
+    });
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/folders/{folderName}/hosts:
+ *   delete:
+ *     summary: Delete all hosts in a folder
+ *     description: Deletes all hosts within a specific folder.
+ *     tags:
+ *       - SSH
+ *     parameters:
+ *       - in: path
+ *         name: folderName
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: All hosts deleted successfully.
+ *       400:
+ *         description: Invalid folder name.
+ *       500:
+ *         description: Failed to delete hosts.
+ */
+router.delete(
+  "/folders/:folderName/hosts",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const folderName = decodeURIComponent(
+      Array.isArray(req.params.folderName)
+        ? req.params.folderName[0]
+        : req.params.folderName,
+    );
+
+    if (!folderName) {
+      return res.status(400).json({ error: "Folder name is required" });
+    }
+
+    try {
+      const hostsToDelete = await db
+        .select({ id: hosts.id })
+        .from(hosts)
+        .where(and(eq(hosts.userId, userId), eq(hosts.folder, folderName)));
+
+      if (hostsToDelete.length === 0) {
+        return res.json({ deletedCount: 0 });
+      }
+
+      const hostIds = hostsToDelete.map((h) => h.id);
+
+      for (const hostId of hostIds) {
+        await db
+          .delete(fileManagerRecent)
+          .where(eq(fileManagerRecent.hostId, hostId));
+        await db
+          .delete(fileManagerPinned)
+          .where(eq(fileManagerPinned.hostId, hostId));
+        await db
+          .delete(fileManagerShortcuts)
+          .where(eq(fileManagerShortcuts.hostId, hostId));
+        await db
+          .delete(commandHistory)
+          .where(eq(commandHistory.hostId, hostId));
+        await db
+          .delete(sshCredentialUsage)
+          .where(eq(sshCredentialUsage.hostId, hostId));
+        await db
+          .delete(recentActivity)
+          .where(eq(recentActivity.hostId, hostId));
+        await db.delete(hostAccess).where(eq(hostAccess.hostId, hostId));
+        await db
+          .delete(sessionRecordings)
+          .where(eq(sessionRecordings.hostId, hostId));
+      }
+
+      await db
+        .delete(hosts)
+        .where(and(eq(hosts.userId, userId), eq(hosts.folder, folderName)));
+
+      databaseLogger.success("All hosts in folder deleted", {
+        operation: "delete_folder_hosts",
+        userId,
+        folderName,
+        deletedCount: hostsToDelete.length,
+      });
+
+      res.json({ deletedCount: hostsToDelete.length });
+    } catch (error) {
+      sshLogger.error("Failed to delete hosts in folder", error, {
+        operation: "delete_folder_hosts",
+        userId,
+        folderName,
+      });
+      res.status(500).json({ error: "Failed to delete hosts in folder" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/autostart/enable:
+ *   post:
+ *     summary: Enable autostart for SSH configuration
+ *     description: Enables autostart for a specific SSH configuration.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sshConfigId:
+ *                 type: number
+ *     responses:
+ *       200:
+ *         description: AutoStart enabled successfully.
+ *       400:
+ *         description: Valid sshConfigId is required.
+ *       404:
+ *         description: SSH configuration not found.
+ *       500:
+ *         description: Internal server error.
+ */
+router.post(
+  "/autostart/enable",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { sshConfigId } = req.body;
+
+    if (!sshConfigId || typeof sshConfigId !== "number") {
+      sshLogger.warn(
+        "Missing or invalid sshConfigId in autostart enable request",
+        {
+          operation: "autostart_enable",
+          userId,
+          sshConfigId,
+        },
+      );
+      return res.status(400).json({ error: "Valid sshConfigId is required" });
+    }
+
+    try {
+      const userDataKey = DataCrypto.getUserDataKey(userId);
+      if (!userDataKey) {
+        sshLogger.warn(
+          "User attempted to enable autostart without unlocked data",
+          {
+            operation: "autostart_enable_failed",
+            userId,
+            sshConfigId,
+            reason: "data_locked",
+          },
+        );
+        return res.status(400).json({
+          error: "Failed to enable autostart. Ensure user data is unlocked.",
+        });
+      }
+
+      const sshConfig = await db
+        .select()
+        .from(hosts)
+        .where(and(eq(hosts.id, sshConfigId), eq(hosts.userId, userId)));
+
+      if (sshConfig.length === 0) {
+        sshLogger.warn("SSH config not found for autostart enable", {
+          operation: "autostart_enable_failed",
+          userId,
+          sshConfigId,
+          reason: "config_not_found",
+        });
+        return res.status(404).json({
+          error: "SSH configuration not found",
+        });
+      }
+
+      const config = sshConfig[0];
+
+      const decryptedConfig = DataCrypto.decryptRecord(
+        "ssh_data",
+        config,
+        userId,
+        userDataKey,
+      );
+
+      let updatedTunnelConnections = config.tunnelConnections;
+      if (config.tunnelConnections) {
+        try {
+          const tunnelConnections = JSON.parse(config.tunnelConnections);
+
+          const resolvedConnections = await Promise.all(
+            tunnelConnections.map(async (tunnel: Record<string, unknown>) => {
+              if (
+                tunnel.autoStart &&
+                tunnel.endpointHost &&
+                !tunnel.endpointPassword &&
+                !tunnel.endpointKey
+              ) {
+                const endpointHosts = await db
+                  .select()
+                  .from(hosts)
+                  .where(eq(hosts.userId, userId));
+
+                const endpointHost = endpointHosts.find(
+                  (h) =>
+                    h.name === tunnel.endpointHost ||
+                    `${h.username}@${h.ip}` === tunnel.endpointHost,
+                );
+
+                if (endpointHost) {
+                  const decryptedEndpoint = DataCrypto.decryptRecord(
+                    "ssh_data",
+                    endpointHost,
+                    userId,
+                    userDataKey,
+                  );
+
+                  return {
+                    ...tunnel,
+                    endpointPassword: decryptedEndpoint.password || null,
+                    endpointKey: decryptedEndpoint.key || null,
+                    endpointKeyPassword: decryptedEndpoint.keyPassword || null,
+                    endpointAuthType: endpointHost.authType,
+                  };
+                }
+              }
+              return tunnel;
+            }),
+          );
+
+          updatedTunnelConnections = JSON.stringify(resolvedConnections);
+        } catch (error) {
+          sshLogger.warn("Failed to update tunnel connections", {
+            operation: "tunnel_connections_update_failed",
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      await db
+        .update(hosts)
+        .set({
+          autostartPassword: decryptedConfig.password || null,
+          autostartKey: decryptedConfig.key || null,
+          autostartKeyPassword: decryptedConfig.keyPassword || null,
+          tunnelConnections: updatedTunnelConnections,
+        })
+        .where(eq(hosts.id, sshConfigId));
+
+      try {
+        await DatabaseSaveTrigger.triggerSave();
+      } catch (saveError) {
+        sshLogger.warn("Database save failed after autostart", {
+          operation: "autostart_db_save_failed",
+          error:
+            saveError instanceof Error ? saveError.message : "Unknown error",
+        });
+      }
+
+      res.json({
+        message: "AutoStart enabled successfully",
+        sshConfigId,
+      });
+    } catch (error) {
+      sshLogger.error("Error enabling autostart", error, {
+        operation: "autostart_enable_error",
+        userId,
+        sshConfigId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/autostart/disable:
+ *   delete:
+ *     summary: Disable autostart for SSH configuration
+ *     description: Disables autostart for a specific SSH configuration.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               sshConfigId:
+ *                 type: number
+ *     responses:
+ *       200:
+ *         description: AutoStart disabled successfully.
+ *       400:
+ *         description: Valid sshConfigId is required.
+ *       500:
+ *         description: Internal server error.
+ */
+router.delete(
+  "/autostart/disable",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+    const { sshConfigId } = req.body;
+
+    if (!sshConfigId || typeof sshConfigId !== "number") {
+      sshLogger.warn(
+        "Missing or invalid sshConfigId in autostart disable request",
+        {
+          operation: "autostart_disable",
+          userId,
+          sshConfigId,
+        },
+      );
+      return res.status(400).json({ error: "Valid sshConfigId is required" });
+    }
+
+    try {
+      await db
+        .update(hosts)
+        .set({
+          autostartPassword: null,
+          autostartKey: null,
+          autostartKeyPassword: null,
+        })
+        .where(and(eq(hosts.id, sshConfigId), eq(hosts.userId, userId)));
+
+      res.json({
+        message: "AutoStart disabled successfully",
+        sshConfigId,
+      });
+    } catch (error) {
+      sshLogger.error("Error disabling autostart", error, {
+        operation: "autostart_disable_error",
+        userId,
+        sshConfigId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/autostart/status:
+ *   get:
+ *     summary: Get autostart status
+ *     description: Retrieves the autostart status for the user's SSH configurations.
+ *     tags:
+ *       - SSH
+ *     responses:
+ *       200:
+ *         description: A list of autostart configurations.
+ *       500:
+ *         description: Internal server error.
+ */
+router.get(
+  "/autostart/status",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    try {
+      const autostartConfigs = await db
+        .select()
+        .from(hosts)
+        .where(
+          and(
+            eq(hosts.userId, userId),
+            or(
+              isNotNull(hosts.autostartPassword),
+              isNotNull(hosts.autostartKey),
+            ),
+          ),
+        );
+
+      const statusList = autostartConfigs.map((config) => ({
+        sshConfigId: config.id,
+        host: config.ip,
+        port: config.port,
+        username: config.username,
+        authType: config.authType,
+      }));
+
+      res.json({
+        autostart_configs: statusList,
+        total_count: statusList.length,
+      });
+    } catch (error) {
+      sshLogger.error("Error getting autostart status", error, {
+        operation: "autostart_status_error",
+        userId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/opkssh/token/{hostId}:
+ *   get:
+ *     summary: Get OPKSSH token status for a host
+ *     tags: [SSH]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: hostId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Host ID
+ *     responses:
+ *       200:
+ *         description: Token status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 exists:
+ *                   type: boolean
+ *                   description: Whether a valid token exists
+ *                 expiresAt:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Token expiration timestamp
+ *                 email:
+ *                   type: string
+ *                   description: User email from OIDC identity
+ *       404:
+ *         description: No valid token found
+ *       500:
+ *         description: Internal server error
+ */
+router.get(
+  "/ssh/opkssh/token/:hostId",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.userId;
+    const hostId = parseInt(
+      Array.isArray(req.params.hostId)
+        ? req.params.hostId[0]
+        : req.params.hostId,
+    );
+
+    if (!userId || isNaN(hostId)) {
+      return res.status(400).json({ error: "Invalid request" });
+    }
+
+    try {
+      const { opksshTokens } = await import("../db/schema.js");
+      const token = await db
+        .select()
+        .from(opksshTokens)
+        .where(
+          and(eq(opksshTokens.userId, userId), eq(opksshTokens.hostId, hostId)),
+        )
+        .limit(1);
+
+      if (!token || token.length === 0) {
+        return res.status(404).json({ exists: false });
+      }
+
+      const tokenData = token[0];
+      const expiresAt = new Date(tokenData.expiresAt);
+
+      if (expiresAt < new Date()) {
+        await db
+          .delete(opksshTokens)
+          .where(
+            and(
+              eq(opksshTokens.userId, userId),
+              eq(opksshTokens.hostId, hostId),
+            ),
+          );
+        return res.status(404).json({ exists: false });
+      }
+
+      res.json({
+        exists: true,
+        expiresAt: tokenData.expiresAt,
+        email: tokenData.email,
+      });
+    } catch (error) {
+      sshLogger.error("Error retrieving OPKSSH token status", error, {
+        operation: "opkssh_token_status_error",
+        userId,
+        hostId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /ssh/opkssh/token/{hostId}:
+ *   delete:
+ *     summary: Delete OPKSSH token for a host
+ *     tags: [SSH]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: hostId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Host ID
+ *     responses:
+ *       200:
+ *         description: Token deleted successfully
+ *       500:
+ *         description: Internal server error
+ */
+router.delete(
+  "/ssh/opkssh/token/:hostId",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.userId;
+    const hostId = parseInt(
+      Array.isArray(req.params.hostId)
+        ? req.params.hostId[0]
+        : req.params.hostId,
+    );
+
+    if (!userId || isNaN(hostId)) {
+      return res.status(400).json({ error: "Invalid request" });
+    }
+
+    try {
+      const { deleteOPKSSHToken } = await import("../../ssh/opkssh-auth.js");
+      await deleteOPKSSHToken(userId, hostId);
+      res.json({ success: true });
+    } catch (error) {
+      sshLogger.error("Error deleting OPKSSH token", error, {
+        operation: "opkssh_token_delete_error",
+        userId,
+        hostId,
+      });
+      res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+function rewriteOPKSSHHtml(
+  html: string,
+  requestId: string,
+  routePrefix: "opkssh-chooser" | "opkssh-callback",
+): string {
+  const basePath = `/ssh/${routePrefix}/${requestId}`;
+
+  const attrPatterns = ["action", "href", "src"];
+  for (const attr of attrPatterns) {
+    html = html.replace(
+      new RegExp(`${attr}="(/[^"]*)`, "g"),
+      `${attr}="${basePath}$1`,
+    );
+    html = html.replace(
+      new RegExp(`${attr}='(/[^']*)`, "g"),
+      `${attr}='${basePath}$1`,
+    );
+  }
+
+  html = html.replace(
+    /href=["']?http:\/\/localhost:\d+\/([^"'\s]*)/g,
+    `href="${basePath}/$1`,
+  );
+  html = html.replace(
+    /action=["']?http:\/\/localhost:\d+\/([^"'\s]*)/g,
+    `action="${basePath}/$1`,
+  );
+  html = html.replace(
+    /src=["']?http:\/\/localhost:\d+\/([^"'\s]*)/g,
+    `src="${basePath}/$1`,
+  );
+
+  html = html.replace(
+    /(window\.location\.href\s*=\s*["'])http:\/\/localhost:\d+\/([^"']*)(["'])/g,
+    `$1${basePath}/$2$3`,
+  );
+  html = html.replace(
+    /(window\.location\s*=\s*["'])http:\/\/localhost:\d+\/([^"']*)(["'])/g,
+    `$1${basePath}/$2$3`,
+  );
+  html = html.replace(
+    /(fetch\(["'])http:\/\/localhost:\d+\/([^"']*)(["'])/g,
+    `$1${basePath}/$2$3`,
+  );
+
+  html = html.replace(
+    /(location\.assign\(["'])http:\/\/localhost:\d+\/([^"']*)(["']\))/g,
+    `$1${basePath}/$2$3`,
+  );
+  html = html.replace(
+    /(location\.replace\(["'])http:\/\/localhost:\d+\/([^"']*)(["']\))/g,
+    `$1${basePath}/$2$3`,
+  );
+
+  html = html.replace(
+    /(<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^;]+;\s*url=)http:\/\/localhost:\d+\/([^"']+)(["'][^>]*>)/gi,
+    `$1${basePath}/$2$3`,
+  );
+
+  html = html.replace(
+    /(data-[\w-]+=["'])http:\/\/localhost:\d+\/([^"']*)(["'])/g,
+    `$1${basePath}/$2$3`,
+  );
+
+  const baseTag = `<base href="${basePath}/">`;
+
+  if (html.includes("<base")) {
+    sshLogger.info("Replacing existing base tag", {
+      operation: "opkssh_html_rewrite_base_tag",
+      requestId,
+      basePath,
+    });
+    html = html.replace(/<base[^>]*>/i, baseTag);
+  } else if (html.includes("<head>")) {
+    sshLogger.info("Inserting base tag into head", {
+      operation: "opkssh_html_rewrite_base_tag_insert",
+      requestId,
+      basePath,
+    });
+    html = html.replace(/<head>/i, `<head>${baseTag}`);
+  } else {
+    sshLogger.warn("No <head> tag found, wrapping HTML", {
+      operation: "opkssh_html_rewrite_no_head",
+      requestId,
+      htmlLength: html.length,
+      htmlPreview: html.substring(0, 200),
+    });
+    html = `<!DOCTYPE html><html><head>${baseTag}</head><body>${html}</body></html>`;
+  }
+
+  sshLogger.info("HTML rewrite complete", {
+    operation: "opkssh_html_rewrite_complete",
+    requestId,
+    routePrefix,
+    hasBaseTag: html.includes("<base href="),
+    staticAssetCount: (html.match(/\/static\//g) || []).length,
+  });
+
+  return html;
+}
+
+/**
+ * @openapi
+ * /opkssh-chooser/{requestId}:
+ *   get:
+ *     summary: Proxy OPKSSH provider chooser page and all related resources
+ *     tags: [SSH]
+ *     parameters:
+ *       - name: requestId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Authentication request ID
+ *     responses:
+ *       200:
+ *         description: Chooser page content
+ *       404:
+ *         description: Session not found
+ *       500:
+ *         description: Proxy error
+ */
+
+router.use(
+  "/opkssh-chooser/:requestId",
+  async (req: Request, res: Response) => {
+    const requestId = Array.isArray(req.params.requestId)
+      ? req.params.requestId[0]
+      : req.params.requestId;
+
+    const fullPath = req.originalUrl || req.url;
+    const pathAfterRequestIdTemp =
+      fullPath.split(`/ssh/opkssh-chooser/${requestId}`)[1] || "";
+
+    sshLogger.info("OPKSSH chooser proxy request", {
+      operation: "opkssh_chooser_proxy_request",
+      requestId,
+      url: req.url,
+      originalUrl: req.originalUrl,
+      fullPath,
+      pathAfterRequestId: pathAfterRequestIdTemp,
+      method: req.method,
+    });
+
+    try {
+      const { getActiveAuthSession } = await import("../../ssh/opkssh-auth.js");
+      const session = getActiveAuthSession(requestId);
+
+      if (!session) {
+        sshLogger.error("Session not found for chooser request", {
+          operation: "opkssh_chooser_session_not_found",
+          requestId,
+        });
+        res.status(404).send(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Session Not Found</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+                background: #18181b;
+                color: #fafafa;
+                padding: 1rem;
+              }
+              .container {
+                text-align: center;
+                background: #27272a;
+                padding: 3rem 2rem;
+                border-radius: 0.625rem;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                max-width: 400px;
+                width: 100%;
+              }
+              .icon {
+                font-size: 3rem;
+                margin-bottom: 1rem;
+                color: #f87171;
+              }
+              h1 {
+                color: #fafafa;
+                font-size: 1.5rem;
+                font-weight: 600;
+                margin-bottom: 0.75rem;
+              }
+              p {
+                color: #9ca3af;
+                font-size: 0.95rem;
+                line-height: 1.5;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Session Not Found</h1>
+              <p>This authentication session has expired or is invalid.</p>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
+
+      const axios = (await import("axios")).default;
+
+      const fullPath = req.originalUrl || req.url;
+      const pathAfterRequestId =
+        fullPath.split(`/ssh/opkssh-chooser/${requestId}`)[1] || "";
+      const targetPath = pathAfterRequestId || "/chooser";
+
+      if (!session.localPort || session.localPort === 0) {
+        sshLogger.error("OPKSSH session has no local port", {
+          operation: "opkssh_chooser_proxy",
+          requestId,
+          sessionStatus: session.status,
+        });
+        res.status(500).send(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Error</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+                background: #18181b;
+                color: #fafafa;
+                padding: 1rem;
+              }
+              .container {
+                text-align: center;
+                background: #27272a;
+                padding: 3rem 2rem;
+                border-radius: 0.625rem;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                max-width: 400px;
+                width: 100%;
+              }
+              h1 {
+                color: #fafafa;
+                font-size: 1.5rem;
+                font-weight: 600;
+                margin-bottom: 0.75rem;
+              }
+              p {
+                color: #9ca3af;
+                font-size: 0.95rem;
+                line-height: 1.5;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Authentication Error</h1>
+              <p>Failed to load authentication page. OPKSSH process may not be ready yet. Please try again.</p>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
+
+      const targetUrl = `http://localhost:${session.localPort}${targetPath}`;
+
+      sshLogger.info("Proxying to OPKSSH chooser", {
+        operation: "opkssh_chooser_proxy_request_to_opkssh",
+        requestId,
+        targetUrl,
+        localPort: session.localPort,
+        targetPath,
+      });
+
+      const response = await axios({
+        method: req.method,
+        url: targetUrl,
+        headers: {
+          ...req.headers,
+          host: `localhost:${session.localPort}`,
+        },
+        data: req.body,
+        timeout: 10000,
+        validateStatus: () => true,
+        maxRedirects: 0,
+        responseType: "arraybuffer",
+      });
+
+      sshLogger.info("OPKSSH chooser response received", {
+        operation: "opkssh_chooser_proxy_response",
+        requestId,
+        statusCode: response.status,
+        contentType: response.headers["content-type"],
+        contentLength: response.headers["content-length"],
+        hasLocation: !!response.headers.location,
+      });
+
+      Object.entries(response.headers).forEach(([key, value]) => {
+        if (key.toLowerCase() === "transfer-encoding") {
+          return;
+        }
+        if (key.toLowerCase() === "location") {
+          const location = value as string;
+          if (location.startsWith("/")) {
+            res.setHeader(key, `/ssh/opkssh-chooser/${requestId}${location}`);
+          } else {
+            const localhostMatch = location.match(
+              /^http:\/\/localhost:(\d+)(\/.*)?$/,
+            );
+            if (localhostMatch) {
+              const port = parseInt(localhostMatch[1], 10);
+              const path = localhostMatch[2] || "/";
+              if (session.callbackPort && port === session.callbackPort) {
+                res.setHeader(key, `/ssh/opkssh-callback/${requestId}${path}`);
+              } else if (port === session.localPort) {
+                res.setHeader(key, `/ssh/opkssh-chooser/${requestId}${path}`);
+              } else {
+                const isCallback =
+                  path.includes("login") || path.includes("callback");
+                const prefix = isCallback
+                  ? "opkssh-callback"
+                  : "opkssh-chooser";
+                res.setHeader(key, `/ssh/${prefix}/${requestId}${path}`);
+              }
+            } else {
+              res.setHeader(key, value as string);
+            }
+          }
+        } else {
+          res.setHeader(key, value as string);
+        }
+      });
+
+      const contentType = response.headers["content-type"] || "";
+      if (contentType.includes("text/html")) {
+        const html = rewriteOPKSSHHtml(
+          response.data.toString("utf-8"),
+          requestId,
+          "opkssh-chooser",
+        );
+        res.status(response.status).send(html);
+      } else {
+        res.status(response.status).send(response.data);
+      }
+    } catch (error) {
+      sshLogger.error("Error proxying OPKSSH chooser", error, {
+        operation: "opkssh_chooser_proxy_error",
+        requestId,
+      });
+      res.status(500).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Error</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+              font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              min-height: 100vh;
+              background: #18181b;
+              color: #fafafa;
+              padding: 1rem;
+            }
+            .container {
+              text-align: center;
+              background: #27272a;
+              padding: 3rem 2rem;
+              border-radius: 0.625rem;
+              border: 1px solid rgba(255, 255, 255, 0.1);
+              max-width: 400px;
+              width: 100%;
+            }
+            .icon {
+              font-size: 3rem;
+              margin-bottom: 1rem;
+              color: #f87171;
+            }
+            h1 {
+              color: #fafafa;
+              font-size: 1.5rem;
+              font-weight: 600;
+              margin-bottom: 0.75rem;
+            }
+            p {
+              color: #9ca3af;
+              font-size: 0.95rem;
+              line-height: 1.5;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>Error</h1>
+            <p>Failed to load authentication page. Please try again.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /opkssh-callback:
+ *   get:
+ *     summary: Static OAuth callback from OIDC provider for OPKSSH authentication
+ *     tags: [SSH]
+ *     responses:
+ *       200:
+ *         description: Callback processed successfully
+ *       404:
+ *         description: No active authentication session found
+ *       500:
+ *         description: Authentication failed
+ */
+router.get("/opkssh-callback", async (req: Request, res: Response) => {
+  try {
+    sshLogger.info("OAuth callback received", {
+      operation: "opkssh_static_callback_received",
+      url: req.url,
+      originalUrl: req.originalUrl,
+      query: req.query,
+      headers: {
+        host: req.headers.host,
+        "x-forwarded-proto": req.headers["x-forwarded-proto"],
+        "x-forwarded-host": req.headers["x-forwarded-host"],
+        "x-forwarded-port": req.headers["x-forwarded-port"],
+      },
+    });
+
+    const { getUserIdFromRequest, getActiveSessionsForUser } =
+      await import("../../ssh/opkssh-auth.js");
+
+    const userId = await getUserIdFromRequest({
+      cookies: req.cookies,
+      headers: req.headers as Record<string, string | undefined>,
+    });
+
+    sshLogger.info("User ID resolved", {
+      operation: "opkssh_callback_user_lookup",
+      userId: userId || "null",
+      hasCookies: !!req.cookies?.jwt,
+      cookieKeys: Object.keys(req.cookies || {}),
+    });
+
+    if (!userId) {
+      sshLogger.error("No userId from callback request", {
+        operation: "opkssh_callback_unauthorized",
+        cookies: Object.keys(req.cookies || {}),
+        headers: Object.keys(req.headers),
+      });
+      res.status(401).send("Unauthorized - no valid session");
+      return;
+    }
+
+    const userSessions = getActiveSessionsForUser(userId);
+
+    sshLogger.info("Active sessions for user", {
+      operation: "opkssh_callback_session_lookup",
+      userId,
+      sessionCount: userSessions.length,
+      sessions: userSessions.map((s) => ({
+        requestId: s.requestId,
+        status: s.status,
+        hasCallbackPort: !!s.callbackPort,
+        callbackPort: s.callbackPort,
+        hasLocalPort: !!s.localPort,
+        localPort: s.localPort,
+      })),
+    });
+
+    if (userSessions.length === 0) {
+      sshLogger.error("No active sessions for callback", {
+        operation: "opkssh_callback_no_sessions",
+        userId,
+      });
+      res.status(404).send("No active authentication session found");
+      return;
+    }
+
+    const session = userSessions[userSessions.length - 1];
+
+    if (!session.callbackPort) {
+      sshLogger.error("Session callback port not ready", {
+        operation: "opkssh_callback_port_not_ready",
+        userId,
+        requestId: session.requestId,
+        sessionStatus: session.status,
+        hasLocalPort: !!session.localPort,
+      });
+      res.status(503).send("OPKSSH callback listener not ready yet");
+      return;
+    }
+
+    const queryString = req.url.includes("?")
+      ? req.url.substring(req.url.indexOf("?"))
+      : "";
+    const redirectUrl = `/ssh/opkssh-callback/${session.requestId}/login-callback${queryString}`;
+
+    sshLogger.info("Redirecting OAuth callback to dynamic route", {
+      operation: "opkssh_static_callback_redirect",
+      userId,
+      requestId: session.requestId,
+      callbackPort: session.callbackPort,
+      queryParams: Object.keys(req.query),
+      redirectUrl,
+    });
+
+    res.redirect(302, redirectUrl);
+  } catch (error) {
+    sshLogger.error("Error handling OPKSSH static callback", error, {
+      operation: "opkssh_static_callback_error",
+      url: req.url,
+      originalUrl: req.originalUrl,
+    });
+    res.status(500).send("Authentication callback failed");
+  }
+});
+
+/**
+ * @openapi
+ * /opkssh-callback/{requestId}:
+ *   get:
+ *     summary: OAuth callback from OIDC provider for OPKSSH authentication (handles all sub-paths)
+ *     tags: [SSH]
+ *     parameters:
+ *       - name: requestId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Authentication request ID
+ *     responses:
+ *       200:
+ *         description: Callback processed successfully
+ *       404:
+ *         description: Invalid authentication session
+ *       500:
+ *         description: Authentication failed
+ */
+router.use(
+  "/opkssh-callback/:requestId",
+  async (req: Request, res: Response) => {
+    const requestId = Array.isArray(req.params.requestId)
+      ? req.params.requestId[0]
+      : req.params.requestId;
+
+    try {
+      const { getActiveAuthSession } = await import("../../ssh/opkssh-auth.js");
+      const session = getActiveAuthSession(requestId);
+
+      if (!session) {
+        res.status(404).send(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Session Not Found</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+                background: #18181b;
+                color: #fafafa;
+                padding: 1rem;
+              }
+              .container {
+                text-align: center;
+                background: #27272a;
+                padding: 3rem 2rem;
+                border-radius: 0.625rem;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                max-width: 400px;
+                width: 100%;
+              }
+              .icon {
+                font-size: 3rem;
+                margin-bottom: 1rem;
+                color: #f87171;
+              }
+              h1 {
+                color: #fafafa;
+                font-size: 1.5rem;
+                font-weight: 600;
+                margin-bottom: 0.75rem;
+              }
+              p {
+                color: #9ca3af;
+                font-size: 0.95rem;
+                line-height: 1.5;
+              }
+              p + p {
+                margin-top: 0.5rem;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Session Not Found</h1>
+              <p>Authentication session expired or invalid.</p>
+              <p>Please close this window and try again.</p>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
+
+      const axios = (await import("axios")).default;
+      const fullPath = req.originalUrl || req.url;
+      const pathAfterRequestId =
+        fullPath.split(`/ssh/opkssh-callback/${requestId}`)[1] || "";
+      const targetPath = pathAfterRequestId || "/login-callback";
+
+      if (!session.callbackPort || session.callbackPort === 0) {
+        sshLogger.error("OPKSSH callback session has no callback port", {
+          operation: "opkssh_callback_proxy",
+          requestId,
+          sessionStatus: session.status,
+        });
+        res.status(500).send(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Error</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body {
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+                background: #18181b;
+                color: #fafafa;
+                padding: 1rem;
+              }
+              .container {
+                text-align: center;
+                background: #27272a;
+                padding: 3rem 2rem;
+                border-radius: 0.625rem;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                max-width: 400px;
+                width: 100%;
+              }
+              h1 {
+                color: #fafafa;
+                font-size: 1.5rem;
+                font-weight: 600;
+                margin-bottom: 0.75rem;
+              }
+              p {
+                color: #9ca3af;
+                font-size: 0.95rem;
+                line-height: 1.5;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Callback Error</h1>
+              <p>OPKSSH callback listener not ready. Please try authenticating again.</p>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
+
+      const targetUrl = `http://localhost:${session.callbackPort}${targetPath}`;
+
+      const response = await axios({
+        method: req.method,
+        url: targetUrl,
+        headers: {
+          ...req.headers,
+          host: `localhost:${session.callbackPort}`,
+        },
+        data: req.body,
+        timeout: 10000,
+        validateStatus: () => true,
+        maxRedirects: 0,
+        responseType: "arraybuffer",
+      });
+
+      Object.entries(response.headers).forEach(([key, value]) => {
+        if (key.toLowerCase() === "transfer-encoding") {
+          return;
+        }
+        if (key.toLowerCase() === "location") {
+          const location = value as string;
+          if (location.startsWith("/")) {
+            res.setHeader(key, `/ssh/opkssh-callback/${requestId}${location}`);
+          } else {
+            res.setHeader(key, value as string);
+          }
+        } else {
+          res.setHeader(key, value as string);
+        }
+      });
+
+      const contentType = response.headers["content-type"] || "";
+      if (contentType.includes("text/html")) {
+        const html = rewriteOPKSSHHtml(
+          response.data.toString("utf-8"),
+          requestId,
+          "opkssh-callback",
+        );
+        res.status(response.status).send(html);
+      } else {
+        res.status(response.status).send(response.data);
+      }
+    } catch (error) {
+      sshLogger.error("Error handling OPKSSH OAuth callback", error, {
+        operation: "opkssh_oauth_callback_error",
+        requestId,
+      });
+
+      res.status(500).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Error</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+              font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              min-height: 100vh;
+              background: #18181b;
+              color: #fafafa;
+              padding: 1rem;
+            }
+            .container {
+              text-align: center;
+              background: #27272a;
+              padding: 3rem 2rem;
+              border-radius: 0.625rem;
+              border: 1px solid rgba(255, 255, 255, 0.1);
+              max-width: 400px;
+              width: 100%;
+            }
+            .icon {
+              font-size: 3rem;
+              margin-bottom: 1rem;
+              color: #f87171;
+            }
+            h1 {
+              color: #fafafa;
+              font-size: 1.5rem;
+              font-weight: 600;
+              margin-bottom: 0.75rem;
+            }
+            p {
+              color: #9ca3af;
+              font-size: 0.95rem;
+              line-height: 1.5;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>Error</h1>
+            <p>An unexpected error occurred. Please try again.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+  },
+);
+
+/**
+ * @openapi
+ * /db/proxy/test:
+ *   post:
+ *     summary: Test proxy connectivity
+ *     description: Tests connectivity through a proxy configuration to a target host.
+ *     tags:
+ *       - SSH
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               singleProxy:
+ *                 type: object
+ *                 properties:
+ *                   host:
+ *                     type: string
+ *                   port:
+ *                     type: number
+ *                   type:
+ *                     type: string
+ *                   username:
+ *                     type: string
+ *                   password:
+ *                     type: string
+ *               proxyChain:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *               testTarget:
+ *                 type: object
+ *                 properties:
+ *                   host:
+ *                     type: string
+ *                   port:
+ *                     type: number
+ *     responses:
+ *       200:
+ *         description: Test result
+ *       500:
+ *         description: Proxy connection failed
+ */
+router.post(
+  "/db/proxy/test",
+  authenticateJWT,
+  requireDataAccess,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { singleProxy, proxyChain, testTarget } = req.body;
+
+      const { testProxyConnectivity } =
+        await import("../../utils/proxy-helper.js");
+
+      const result = await testProxyConnectivity({
+        singleProxy,
+        proxyChain,
+        testTarget,
+      });
+
+      res.json(result);
+    } catch (error) {
+      sshLogger.error("Proxy connectivity test failed", error, {
+        operation: "proxy_test",
+        userId: req.userId,
+      });
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
+
+export default router;
