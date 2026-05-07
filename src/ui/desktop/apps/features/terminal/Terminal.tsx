@@ -1968,8 +1968,10 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           !e.metaKey &&
           e.key.toLowerCase() === "v"
         ) {
+          e.preventDefault();
+          e.stopPropagation();
           pasteClipboardIntoTerminal();
-          return true;
+          return false;
         }
 
         if (
@@ -2439,6 +2441,9 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           return;
         }
 
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
         pasteClipboardIntoTerminal();
       };
 
