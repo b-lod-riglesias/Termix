@@ -104,6 +104,7 @@ interface TabContextType {
   currentTab: number | null;
   allSplitScreenTab: number[];
   splitLayout: SplitNode | null;
+  splitPanelSizes: Record<string, number[]>;
   focusedSplitTabId: number | null;
   recentTerminalTabs: Array<{ title: string; hostConfig: any }>;
   addTab: (tab: Omit<Tab, "id">) => number;
@@ -116,6 +117,7 @@ interface TabContextType {
   setFocusedSplitTab: (tabId: number) => void;
   closeFocusedPane: () => void;
   moveFocusedPane: (direction: "left" | "right" | "up" | "down") => void;
+  updateSplitPanelSizes: (panelKey: string, sizes: number[]) => void;
   swapPaneTabs: (sourceTabId: number, targetTabId: number) => void;
   renameTab: (tabId: number, newTitle: string) => void;
   getSessionRootForTab: (tabId: number) => number;
@@ -249,6 +251,9 @@ export function TabProvider({ children }: TabProviderProps) {
   ]);
   const [currentTab, setCurrentTabState] = useState<number>(1);
   const [splitLayouts, setSplitLayouts] = useState<Record<number, SplitNode>>(
+    {},
+  );
+  const [splitPanelSizes, setSplitPanelSizes] = useState<Record<string, number[]>>(
     {},
   );
   const [focusedSplitTabId, setFocusedSplitTabId] = useState<number | null>(
@@ -468,6 +473,13 @@ export function TabProvider({ children }: TabProviderProps) {
       });
       return next;
     });
+    setSplitPanelSizes((prev) => {
+      const next = { ...prev };
+      Object.keys(next).forEach((key) => {
+        if (key.startsWith(`${layoutInfo.rootId}:`)) delete next[key];
+      });
+      return next;
+    });
 
     if (focusedSplitTabId !== null && idsToRemove.has(focusedSplitTabId)) {
       setFocusedSplitTabId(null);
@@ -493,6 +505,13 @@ export function TabProvider({ children }: TabProviderProps) {
         const next = { ...prev };
         if (!pruned || collectLeafIds(pruned).length <= 1) {
           delete next[rootId];
+          setSplitPanelSizes((prevSizes) => {
+            const nextSizes = { ...prevSizes };
+            Object.keys(nextSizes).forEach((key) => {
+              if (key.startsWith(`${rootId}:`)) delete nextSizes[key];
+            });
+            return nextSizes;
+          });
           return next;
         }
         next[rootId] = pruned;
@@ -656,6 +675,26 @@ export function TabProvider({ children }: TabProviderProps) {
     const swapped = swapLeafIds(layoutInfo.node, targetId, bestId);
     setSplitLayouts((prev) => ({ ...prev, [layoutInfo.rootId]: swapped }));
     setFocusedSplitTabId(targetId);
+  };
+
+  const updateSplitPanelSizes = (panelKey: string, sizes: number[]) => {
+    if (!panelKey || !Array.isArray(sizes) || sizes.length < 2) return;
+    const normalized = sizes.slice(0, 2).map((size) => {
+      const value = Number(size);
+      if (!Number.isFinite(value)) return 50;
+      return Math.max(5, Math.min(95, Math.round(value * 1000) / 1000));
+    });
+    setSplitPanelSizes((prev) => {
+      const current = prev[panelKey];
+      if (
+        current &&
+        current.length === normalized.length &&
+        current.every((value, index) => value === normalized[index])
+      ) {
+        return prev;
+      }
+      return { ...prev, [panelKey]: normalized };
+    });
   };
 
   const swapPaneTabs = (sourceTabId: number, targetTabId: number) => {
@@ -866,6 +905,18 @@ export function TabProvider({ children }: TabProviderProps) {
     });
     setSplitLayouts(nextLayouts);
 
+    const rawPanelSizes = parsed?.splitPanelSizes || {};
+    const nextPanelSizes: Record<string, number[]> = {};
+    Object.entries(rawPanelSizes).forEach(([key, sizes]) => {
+      const rootId = Number(String(key).split(":")[0]);
+      if (!validIds.has(rootId) || !Array.isArray(sizes)) return;
+      const normalized = sizes.slice(0, 2).map((size: any) => Number(size));
+      if (normalized.length === 2 && normalized.every(Number.isFinite)) {
+        nextPanelSizes[key] = normalized;
+      }
+    });
+    setSplitPanelSizes(nextPanelSizes);
+
     const focusedId = Number(parsed?.focusedSplitTabId);
     setFocusedSplitTabId(validIds.has(focusedId) ? focusedId : nextCurrentTab);
 
@@ -898,6 +949,7 @@ export function TabProvider({ children }: TabProviderProps) {
       tabs: tabsToPersist,
       currentTab,
       splitLayouts,
+      splitPanelSizes,
       focusedSplitTabId,
       recentTerminalTabs,
       nextTabId: nextTabId.current,
@@ -962,7 +1014,14 @@ export function TabProvider({ children }: TabProviderProps) {
     } catch {
       // ignore
     }
-  }, [tabs, currentTab, splitLayouts, focusedSplitTabId, recentTerminalTabs]);
+  }, [
+    tabs,
+    currentTab,
+    splitLayouts,
+    splitPanelSizes,
+    focusedSplitTabId,
+    recentTerminalTabs,
+  ]);
 
   useEffect(() => {
     setTabs((prev) =>
@@ -983,6 +1042,7 @@ export function TabProvider({ children }: TabProviderProps) {
       currentTab,
       allSplitScreenTab,
       splitLayout,
+      splitPanelSizes,
       focusedSplitTabId,
       recentTerminalTabs,
       addTab,
@@ -995,6 +1055,7 @@ export function TabProvider({ children }: TabProviderProps) {
       setFocusedSplitTab: setFocusedSplitTabId,
       closeFocusedPane,
       moveFocusedPane,
+      updateSplitPanelSizes,
       swapPaneTabs,
       renameTab,
       getSessionRootForTab,
@@ -1010,6 +1071,7 @@ export function TabProvider({ children }: TabProviderProps) {
       currentTab,
       allSplitScreenTab,
       splitLayout,
+      splitPanelSizes,
       focusedSplitTabId,
       recentTerminalTabs,
     ],

@@ -50,14 +50,17 @@ export function AppView({
 }: AppViewProps): React.ReactElement {
   const {
     tabs,
-    currentTab,
-    splitLayout,
-    focusedSplitTabId,
-    setFocusedSplitTab,
-    swapPaneTabs,
-    removeTab,
-    updateTab,
-  } = useTabs() as any;
+	    currentTab,
+	    splitLayout,
+	    splitPanelSizes,
+	    focusedSplitTabId,
+	    setFocusedSplitTab,
+	    updateSplitPanelSizes,
+	    getSessionRootForTab,
+	    swapPaneTabs,
+	    removeTab,
+	    updateTab,
+	  } = useTabs() as any;
   const { state: sidebarState } = useSidebar();
   const dragSourceRef = React.useRef<number | null>(null);
   const focusedPaneRef = React.useRef<number | null>(null);
@@ -68,8 +71,35 @@ export function AppView({
     null,
   );
 
-  const tabMap = new Map(tabs.map((tab: TabData) => [tab.id, tab]));
-  const isSplitScreen = !!splitLayout;
+	  const tabMap = new Map(tabs.map((tab: TabData) => [tab.id, tab]));
+	  const isSplitScreen = !!splitLayout;
+	  const splitRootId =
+	    isSplitScreen && currentTab && typeof getSessionRootForTab === "function"
+	      ? getSessionRootForTab(currentTab)
+	      : currentTab;
+
+	  const scheduleTerminalLayoutRefresh = React.useCallback(() => {
+	    const refresh = () => {
+	      tabs.forEach((tab: TabData) => {
+	        const handle = tab.terminalRef?.current;
+	        if (!handle) return;
+	        if (typeof handle.fit === "function") {
+	          handle.fit();
+	          return;
+	        }
+	        if (typeof handle.notifyResize === "function") {
+	          handle.notifyResize();
+	          return;
+	        }
+	        if (typeof handle.refresh === "function") {
+	          handle.refresh();
+	        }
+	      });
+	    };
+	    requestAnimationFrame(refresh);
+	    window.setTimeout(refresh, 80);
+	    window.setTimeout(refresh, 220);
+	  }, [tabs]);
 
   React.useEffect(() => {
     focusedPaneRef.current = focusedSplitTabId || currentTab || null;
@@ -311,28 +341,60 @@ export function AppView({
     );
   };
 
-  const renderSplitNode = (
-    node: SplitNode,
-    path = "root",
-  ): React.ReactElement => {
-    if (node.kind === "leaf") {
-      return renderLeaf(node.tabId);
-    }
+	  const renderSplitNode = (
+	    node: SplitNode,
+	    path = "root",
+	  ): React.ReactElement => {
+	    if (node.kind === "leaf") {
+	      return renderLeaf(node.tabId);
+	    }
 
-    return (
-      <ResizablePanelGroup
-        key={`split:${path}:${node.direction}`}
-        direction={toPanelDirection(node.direction) as any}
-        className="h-full w-full"
-      >
-        <ResizablePanel key={`${path}:first`} defaultSize={50} minSize={15}>
-          {renderSplitNode(node.first, `${path}:first`)}
-        </ResizablePanel>
-        <ResizableHandle className="bg-edge" />
-        <ResizablePanel key={`${path}:second`} defaultSize={50} minSize={15}>
-          {renderSplitNode(node.second, `${path}:second`)}
-        </ResizablePanel>
-      </ResizablePanelGroup>
+	    const panelKey = `${splitRootId || "root"}:${path}`;
+	    const storedSizes = Array.isArray(splitPanelSizes?.[panelKey])
+	      ? splitPanelSizes[panelKey]
+	      : null;
+	    const firstSize =
+	      storedSizes && Number.isFinite(Number(storedSizes[0]))
+	        ? Number(storedSizes[0])
+	        : 50;
+	    const secondSize =
+	      storedSizes && Number.isFinite(Number(storedSizes[1]))
+	        ? Number(storedSizes[1])
+	        : 50;
+
+	    return (
+	      <ResizablePanelGroup
+	        key={`split:${path}:${node.direction}`}
+	        direction={toPanelDirection(node.direction) as any}
+	        className="h-full w-full"
+	        onLayout={(sizes: number[]) => {
+	          if (typeof updateSplitPanelSizes === "function") {
+	            updateSplitPanelSizes(panelKey, sizes);
+	          }
+	          scheduleTerminalLayoutRefresh();
+	        }}
+	      >
+	        <ResizablePanel
+	          key={`${path}:first`}
+	          defaultSize={firstSize}
+	          minSize={15}
+	          onResize={scheduleTerminalLayoutRefresh}
+	        >
+	          {renderSplitNode(node.first, `${path}:first`)}
+	        </ResizablePanel>
+	        <ResizableHandle
+	          className="bg-edge"
+	          onDragging={scheduleTerminalLayoutRefresh}
+	        />
+	        <ResizablePanel
+	          key={`${path}:second`}
+	          defaultSize={secondSize}
+	          minSize={15}
+	          onResize={scheduleTerminalLayoutRefresh}
+	        >
+	          {renderSplitNode(node.second, `${path}:second`)}
+	        </ResizablePanel>
+	      </ResizablePanelGroup>
     );
   };
 
