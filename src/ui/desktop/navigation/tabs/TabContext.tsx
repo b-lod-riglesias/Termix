@@ -104,6 +104,7 @@ interface TabContextType {
   currentTab: number | null;
   allSplitScreenTab: number[];
   splitLayout: SplitNode | null;
+  splitLayouts: Record<number, SplitNode>;
   splitPanelSizes: Record<string, number[]>;
   focusedSplitTabId: number | null;
   recentTerminalTabs: Array<{ title: string; hostConfig: any }>;
@@ -1042,6 +1043,7 @@ export function TabProvider({ children }: TabProviderProps) {
       currentTab,
       allSplitScreenTab,
       splitLayout,
+      splitLayouts,
       splitPanelSizes,
       focusedSplitTabId,
       recentTerminalTabs,
@@ -1071,6 +1073,7 @@ export function TabProvider({ children }: TabProviderProps) {
       currentTab,
       allSplitScreenTab,
       splitLayout,
+      splitLayouts,
       splitPanelSizes,
       focusedSplitTabId,
       recentTerminalTabs,

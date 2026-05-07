@@ -48,10 +48,11 @@ export function AppView({
   rightSidebarOpen = false,
   rightSidebarWidth = 400,
 }: AppViewProps): React.ReactElement {
-  const {
-    tabs,
+	  const {
+	    tabs,
 	    currentTab,
 	    splitLayout,
+	    splitLayouts,
 	    splitPanelSizes,
 	    focusedSplitTabId,
 	    setFocusedSplitTab,
@@ -73,14 +74,33 @@ export function AppView({
 
 	  const tabMap = new Map(tabs.map((tab: TabData) => [tab.id, tab]));
 	  const isSplitScreen = !!splitLayout;
-	  const splitRootId =
-	    isSplitScreen && currentTab && typeof getSessionRootForTab === "function"
+	  const activeRootId =
+	    currentTab && typeof getSessionRootForTab === "function"
 	      ? getSessionRootForTab(currentTab)
 	      : currentTab;
+
+	  const renderedRootIds = React.useMemo(() => {
+	    const roots = new Set<number>();
+	    tabs.forEach((tab: TabData) => {
+	      if (!tab?.id) return;
+	      const rootId =
+	        typeof getSessionRootForTab === "function"
+	          ? getSessionRootForTab(tab.id)
+	          : tab.id;
+	      if (rootId && tabMap.has(rootId)) roots.add(rootId);
+	    });
+	    if (currentTab && !roots.has(currentTab)) roots.add(currentTab);
+	    return Array.from(roots);
+	  }, [tabs, currentTab, getSessionRootForTab, tabMap]);
 
 	  const scheduleTerminalLayoutRefresh = React.useCallback(() => {
 	    const refresh = () => {
 	      tabs.forEach((tab: TabData) => {
+	        const rootId =
+	          typeof getSessionRootForTab === "function"
+	            ? getSessionRootForTab(tab.id)
+	            : tab.id;
+	        if (rootId !== activeRootId) return;
 	        const handle = tab.terminalRef?.current;
 	        if (!handle) return;
 	        if (typeof handle.fit === "function") {
@@ -99,7 +119,7 @@ export function AppView({
 	    requestAnimationFrame(refresh);
 	    window.setTimeout(refresh, 80);
 	    window.setTimeout(refresh, 220);
-	  }, [tabs]);
+	  }, [tabs, activeRootId, getSessionRootForTab]);
 
   React.useEffect(() => {
     focusedPaneRef.current = focusedSplitTabId || currentTab || null;
@@ -140,19 +160,27 @@ export function AppView({
     focusPaneTerminal(targetTabId);
   }, [splitLayout, focusedSplitTabId, currentTab, tabs, focusPaneTerminal]);
 
-  const renderAppContent = (tab: TabData, splitScreen: boolean) => {
+	  React.useEffect(() => {
+	    scheduleTerminalLayoutRefresh();
+	  }, [currentTab, splitLayout, scheduleTerminalLayoutRefresh]);
+
+	  const renderAppContent = (
+	    tab: TabData,
+	    splitScreen: boolean,
+	    isVisible: boolean,
+	  ) => {
     if (!tab) return null;
 
     if (tab.type === "terminal") {
-      const activeTabId = splitLayout ? focusedSplitTabId || currentTab : currentTab;
-      return (
-        <Terminal
-          key={`term-${tab.id}-${tab.instanceId || ""}`}
-          tabId={tab.id}
-          isActive={activeTabId === tab.id}
-          ref={tab.terminalRef}
-          hostConfig={tab.hostConfig}
-          isVisible
+	      const activeTabId = splitScreen ? focusedSplitTabId || currentTab : currentTab;
+	      return (
+	        <Terminal
+	          key={`term-${tab.id}-${tab.instanceId || ""}`}
+	          tabId={tab.id}
+	          isActive={isVisible && activeTabId === tab.id}
+	          ref={tab.terminalRef}
+	          hostConfig={tab.hostConfig}
+	          isVisible={isVisible}
           title={tab.title}
           showTitle={false}
           splitScreen={splitScreen}
@@ -166,10 +194,10 @@ export function AppView({
     if (tab.type === "rdp" || tab.type === "vnc" || tab.type === "telnet") {
       if (tab.connectionConfig) {
         return (
-          <GuacamoleDisplay
-            key={`guac-${tab.id}-${tab.instanceId || ""}`}
-            connectionConfig={tab.connectionConfig}
-            isVisible
+	          <GuacamoleDisplay
+	            key={`guac-${tab.id}-${tab.instanceId || ""}`}
+	            connectionConfig={tab.connectionConfig}
+	            isVisible={isVisible}
             onDisconnect={() => removeTab(tab.id)}
             onError={(err) => {
               toast.error(err || "Remote desktop connection error");
@@ -251,12 +279,16 @@ export function AppView({
     );
   };
 
-  const renderLeaf = (tabId: number) => {
-    const tab = tabMap.get(tabId);
-    if (!tab) return <div className="h-full w-full bg-canvas" />;
+	  const renderLeaf = (
+	    tabId: number,
+	    isInSplitScreen: boolean,
+	    isVisible: boolean,
+	  ) => {
+	    const tab = tabMap.get(tabId);
+	    if (!tab) return <div className="h-full w-full bg-canvas" />;
 
-    const focusedId = focusedSplitTabId || currentTab;
-    const isFocused = focusedId === tabId;
+	    const focusedId = focusedSplitTabId || currentTab;
+	    const isFocused = isVisible && focusedId === tabId;
 
     const commitDropSwap = (targetId: number) => {
       const src = dragSourceRef.current;
@@ -273,33 +305,36 @@ export function AppView({
             ? "ring-2 ring-emerald-400"
             : ""
         }`}
-        onMouseDown={() => {
-          focusedPaneRef.current = tabId;
-          setFocusedSplitTab(tabId);
-          focusPaneTerminal(tabId);
-        }}
-        onMouseDownCapture={() => {
-          focusedPaneRef.current = tabId;
-          setFocusedSplitTab(tabId);
-          focusPaneTerminal(tabId);
-        }}
-        onClickCapture={() => {
-          focusedPaneRef.current = tabId;
-          setFocusedSplitTab(tabId);
-          focusPaneTerminal(tabId);
-        }}
-        onDragEnter={() => {
-          if (!isSplitScreen || draggingPaneId === null) return;
-          setDragHoverPaneId(tabId);
-        }}
-        onDragOver={(e) => {
-          if (!isSplitScreen || draggingPaneId === null) return;
-          e.preventDefault();
-          if (dragHoverPaneId !== tabId) setDragHoverPaneId(tabId);
-        }}
-        onDrop={(e) => {
-          if (!isSplitScreen) return;
-          e.preventDefault();
+	        onMouseDown={() => {
+	          if (!isVisible) return;
+	          focusedPaneRef.current = tabId;
+	          setFocusedSplitTab(tabId);
+	          focusPaneTerminal(tabId);
+	        }}
+	        onMouseDownCapture={() => {
+	          if (!isVisible) return;
+	          focusedPaneRef.current = tabId;
+	          setFocusedSplitTab(tabId);
+	          focusPaneTerminal(tabId);
+	        }}
+	        onClickCapture={() => {
+	          if (!isVisible) return;
+	          focusedPaneRef.current = tabId;
+	          setFocusedSplitTab(tabId);
+	          focusPaneTerminal(tabId);
+	        }}
+	        onDragEnter={() => {
+	          if (!isVisible || !isInSplitScreen || draggingPaneId === null) return;
+	          setDragHoverPaneId(tabId);
+	        }}
+	        onDragOver={(e) => {
+	          if (!isVisible || !isInSplitScreen || draggingPaneId === null) return;
+	          e.preventDefault();
+	          if (dragHoverPaneId !== tabId) setDragHoverPaneId(tabId);
+	        }}
+	        onDrop={(e) => {
+	          if (!isVisible || !isInSplitScreen) return;
+	          e.preventDefault();
           const raw =
             e.dataTransfer.getData("text/plain") ||
             e.dataTransfer.getData("text/termix-pane-id");
@@ -313,7 +348,7 @@ export function AppView({
           dragSourceRef.current = null;
         }}
       >
-        {isSplitScreen && (
+	        {isInSplitScreen && (
           <div
             className="bg-surface text-foreground text-[13px] h-[28px] leading-[28px] px-[10px] border-b border-edge tracking-[0px] cursor-grab active:cursor-grabbing"
             draggable
@@ -334,9 +369,9 @@ export function AppView({
             {tab.title}
           </div>
         )}
-        <div className={isSplitScreen ? "h-[calc(100%-28px)]" : "h-full"}>
-          {renderAppContent(tab, isSplitScreen)}
-        </div>
+	        <div className={isInSplitScreen ? "h-[calc(100%-28px)]" : "h-full"}>
+	          {renderAppContent(tab, isInSplitScreen, isVisible)}
+	        </div>
       </div>
     );
   };
@@ -344,12 +379,14 @@ export function AppView({
 	  const renderSplitNode = (
 	    node: SplitNode,
 	    path = "root",
+	    rootId = activeRootId || currentTab || 0,
+	    isVisible = true,
 	  ): React.ReactElement => {
-	    if (node.kind === "leaf") {
-	      return renderLeaf(node.tabId);
-	    }
+		    if (node.kind === "leaf") {
+	      return renderLeaf(node.tabId, true, isVisible);
+		    }
 
-	    const panelKey = `${splitRootId || "root"}:${path}`;
+	    const panelKey = `${rootId || "root"}:${path}`;
 	    const storedSizes = Array.isArray(splitPanelSizes?.[panelKey])
 	      ? splitPanelSizes[panelKey]
 	      : null;
@@ -380,7 +417,7 @@ export function AppView({
 	          minSize={15}
 	          onResize={scheduleTerminalLayoutRefresh}
 	        >
-	          {renderSplitNode(node.first, `${path}:first`)}
+	          {renderSplitNode(node.first, `${path}:first`, rootId, isVisible)}
 	        </ResizablePanel>
 	        <ResizableHandle
 	          className="bg-edge"
@@ -392,7 +429,7 @@ export function AppView({
 	          minSize={15}
 	          onResize={scheduleTerminalLayoutRefresh}
 	        >
-	          {renderSplitNode(node.second, `${path}:second`)}
+	          {renderSplitNode(node.second, `${path}:second`, rootId, isVisible)}
 	        </ResizablePanel>
 	      </ResizablePanelGroup>
     );
@@ -418,13 +455,25 @@ export function AppView({
           "margin-left 200ms linear, margin-right 200ms linear, margin-top 200ms linear",
       }}
     >
-      {splitLayout ? (
-        renderSplitNode(splitLayout as SplitNode)
-      ) : currentTab ? (
-        renderLeaf(currentTab)
-      ) : (
-        <div className="h-full w-full bg-canvas" />
-      )}
+	      {renderedRootIds.length > 0 ? (
+	        renderedRootIds.map((rootId) => {
+	          const rootLayout = splitLayouts?.[rootId] as SplitNode | undefined;
+	          const isVisible = rootId === activeRootId;
+	          return (
+	            <div
+	              key={`root:${rootId}`}
+	              className={`absolute inset-0 ${isVisible ? "block" : "hidden"}`}
+	              aria-hidden={!isVisible}
+	            >
+	              {rootLayout
+	                ? renderSplitNode(rootLayout, "root", rootId, isVisible)
+	                : renderLeaf(rootId, false, isVisible)}
+	            </div>
+	          );
+	        })
+	      ) : (
+	        <div className="h-full w-full bg-canvas" />
+	      )}
     </div>
   );
 }
