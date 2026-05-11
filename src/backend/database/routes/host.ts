@@ -2504,7 +2504,7 @@ async function resolveHostCredentials(
             };
 
             if (!host.overrideCredentialUsername) {
-              resolvedHost.username = sharedCred.username;
+              resolvedHost.username = sharedCred.username || host.username;
             }
 
             return resolvedHost;

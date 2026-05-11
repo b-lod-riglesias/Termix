@@ -1328,7 +1328,7 @@ async function resolveHostCredentials(
             baseHost.authType = sharedCred.authType;
 
             if (!host.overrideCredentialUsername) {
-              baseHost.username = sharedCred.username;
+              baseHost.username = sharedCred.username || host.username;
             }
 
             if (sharedCred.password) {
