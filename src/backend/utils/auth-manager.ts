@@ -1,11 +1,13 @@
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import { UserCrypto } from "./user-crypto.js";
 import { SystemCrypto } from "./system-crypto.js";
 import { DataCrypto } from "./data-crypto.js";
 import { databaseLogger, authLogger } from "./logger.js";
 import type { Request, Response, NextFunction } from "express";
+import bcrypt from "bcryptjs";
 import { db } from "../database/db/index.js";
-import { sessions, trustedDevices } from "../database/db/schema.js";
+import { sessions, trustedDevices, apiKeys } from "../database/db/schema.js";
 import { eq, and, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type { DeviceType } from "./user-agent-parser.js";
@@ -25,12 +27,21 @@ interface JWTPayload {
   userId: string;
   sessionId?: string;
   pendingTOTP?: boolean;
+  dataKeyWrap?: WrappedDataKey;
   iat?: number;
   exp?: number;
 }
 
+interface WrappedDataKey {
+  version: "v1";
+  iv: string;
+  tag: string;
+  data: string;
+}
+
 interface AuthenticatedRequest extends Request {
   userId?: string;
+  sessionId?: string;
   pendingTOTP?: boolean;
   dataKey?: Buffer;
 }
@@ -194,6 +205,113 @@ class AuthManager {
     }
   }
 
+  private getDataKeyAAD(userId: string, sessionId?: string): Buffer {
+    return Buffer.from(`${userId}:${sessionId || ""}`, "utf8");
+  }
+
+  private async wrapUserDataKey(
+    userId: string,
+    sessionId: string | undefined,
+    dataKey: Buffer,
+  ): Promise<WrappedDataKey> {
+    const encryptionKey = await this.systemCrypto.getEncryptionKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey, iv);
+    cipher.setAAD(this.getDataKeyAAD(userId, sessionId));
+
+    const encrypted = Buffer.concat([cipher.update(dataKey), cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    return {
+      version: "v1",
+      iv: iv.toString("base64url"),
+      tag: tag.toString("base64url"),
+      data: encrypted.toString("base64url"),
+    };
+  }
+
+  private async unwrapUserDataKey(
+    userId: string,
+    sessionId: string | undefined,
+    wrapped: WrappedDataKey,
+  ): Promise<Buffer> {
+    if (wrapped.version !== "v1") {
+      throw new Error(
+        `Unsupported wrapped data key version: ${wrapped.version}`,
+      );
+    }
+
+    const encryptionKey = await this.systemCrypto.getEncryptionKey();
+    const decipher = crypto.createDecipheriv(
+      "aes-256-gcm",
+      encryptionKey,
+      Buffer.from(wrapped.iv, "base64url"),
+    );
+    decipher.setAAD(this.getDataKeyAAD(userId, sessionId));
+    decipher.setAuthTag(Buffer.from(wrapped.tag, "base64url"));
+
+    return Buffer.concat([
+      decipher.update(Buffer.from(wrapped.data, "base64url")),
+      decipher.final(),
+    ]);
+  }
+
+  private async addWrappedDataKey(payload: JWTPayload): Promise<void> {
+    if (payload.pendingTOTP) {
+      return;
+    }
+
+    const dataKey = this.userCrypto.getUserDataKey(payload.userId);
+    if (!dataKey) {
+      return;
+    }
+
+    payload.dataKeyWrap = await this.wrapUserDataKey(
+      payload.userId,
+      payload.sessionId,
+      dataKey,
+    );
+  }
+
+  private async restoreDataKeyFromPayload(
+    payload: JWTPayload,
+    sessionExpiresAt?: string,
+  ): Promise<void> {
+    if (
+      !payload.dataKeyWrap ||
+      this.userCrypto.getUserDataKey(payload.userId)
+    ) {
+      return;
+    }
+
+    const expiresAt = sessionExpiresAt
+      ? new Date(sessionExpiresAt).getTime()
+      : payload.exp
+        ? payload.exp * 1000
+        : Date.now();
+
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      return;
+    }
+
+    try {
+      const dataKey = await this.unwrapUserDataKey(
+        payload.userId,
+        payload.sessionId,
+        payload.dataKeyWrap,
+      );
+      this.userCrypto.restoreUserDataKey(payload.userId, dataKey, expiresAt);
+      dataKey.fill(0);
+    } catch (error) {
+      databaseLogger.warn("Failed to restore data key from session token", {
+        operation: "session_data_key_restore_failed",
+        userId: payload.userId,
+        sessionId: payload.sessionId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
   async generateJWTToken(
     userId: string,
     options: {
@@ -206,15 +324,20 @@ class AuthManager {
   ): Promise<string> {
     const jwtSecret = await this.systemCrypto.getJWTSecret();
 
+    const timeoutRow = db.$client
+      .prepare("SELECT value FROM settings WHERE key = 'session_timeout_hours'")
+      .get() as { value: string } | undefined;
+    const defaultExpiry = `${timeoutRow ? parseInt(timeoutRow.value, 10) || 24 : 24}h`;
+
     let expiresIn = options.expiresIn;
     if (!expiresIn && !options.pendingTOTP) {
       if (options.rememberMe) {
         expiresIn = "30d";
       } else {
-        expiresIn = "24h";
+        expiresIn = defaultExpiry;
       }
     } else if (!expiresIn) {
-      expiresIn = "24h";
+      expiresIn = defaultExpiry;
     }
 
     const payload: JWTPayload = { userId };
@@ -225,6 +348,7 @@ class AuthManager {
     if (!options.pendingTOTP && options.deviceType && options.deviceInfo) {
       const sessionId = nanoid();
       payload.sessionId = sessionId;
+      await this.addWrappedDataKey(payload);
 
       const token = jwt.sign(payload, jwtSecret, {
         expiresIn,
@@ -272,6 +396,7 @@ class AuthManager {
       return token;
     }
 
+    await this.addWrappedDataKey(payload);
     return jwt.sign(payload, jwtSecret, { expiresIn } as jwt.SignOptions);
   }
 
@@ -318,6 +443,11 @@ class AuthManager {
             });
             return null;
           }
+
+          await this.restoreDataKeyFromPayload(
+            payload,
+            sessionRecords[0].expiresAt,
+          );
         } catch (dbError) {
           databaseLogger.error(
             "Failed to check session in database during JWT verification",
@@ -329,6 +459,8 @@ class AuthManager {
           );
           return null;
         }
+      } else {
+        await this.restoreDataKeyFromPayload(payload);
       }
       return payload;
     } catch (error) {
@@ -341,12 +473,63 @@ class AuthManager {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async refreshSessionToken(
+    userId: string,
+    sessionId: string,
+  ): Promise<{ token: string; maxAge: number } | null> {
+    const sessionRecords = await db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .limit(1);
+
+    if (sessionRecords.length === 0 || sessionRecords[0].userId !== userId) {
+      return null;
+    }
+
+    const expiresAt = new Date(sessionRecords[0].expiresAt).getTime();
+    const maxAge = expiresAt - Date.now();
+    if (!Number.isFinite(maxAge) || maxAge <= 0) {
+      return null;
+    }
+
+    const payload: JWTPayload = { userId, sessionId };
+    await this.addWrappedDataKey(payload);
+
+    const token = jwt.sign(payload, await this.systemCrypto.getJWTSecret(), {
+      expiresIn: Math.ceil(maxAge / 1000),
+    } as jwt.SignOptions);
+
+    await db
+      .update(sessions)
+      .set({
+        jwtToken: token,
+        lastActiveAt: new Date().toISOString(),
+      })
+      .where(eq(sessions.id, sessionId));
+
+    try {
+      const { saveMemoryDatabaseToFile } =
+        await import("../database/db/index.js");
+      await saveMemoryDatabaseToFile();
+    } catch (saveError) {
+      databaseLogger.error(
+        "Failed to save database after session token refresh",
+        saveError,
+        {
+          operation: "session_token_refresh_db_save_failed",
+          sessionId,
+        },
+      );
+    }
+
+    return { token, maxAge };
+  }
+
   invalidateJWTToken(_token: string): void {
     // expected - no-op, JWT tokens are stateless
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   invalidateUserTokens(_userId: string): void {
     // expected - no-op, handled by session management
   }
@@ -528,9 +711,9 @@ class AuthManager {
     maxAge: number = 24 * 60 * 60 * 1000,
   ) {
     return {
-      httpOnly: false,
+      httpOnly: true,
       secure: req.secure || req.headers["x-forwarded-proto"] === "https",
-      sameSite: "strict" as const,
+      sameSite: "lax" as const,
       maxAge: maxAge,
       path: "/",
     };
@@ -538,11 +721,86 @@ class AuthManager {
 
   getClearCookieOptions(req: RequestWithHeaders) {
     return {
-      httpOnly: false,
+      httpOnly: true,
       secure: req.secure || req.headers["x-forwarded-proto"] === "https",
-      sameSite: "strict" as const,
+      sameSite: "lax" as const,
       path: "/",
     };
+  }
+
+  private async handleApiKeyAuth(
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction,
+    token: string,
+    requireAdmin = false,
+  ): Promise<void> {
+    try {
+      const tokenPrefix = token.substring(0, 12);
+
+      const candidates = await db
+        .select()
+        .from(apiKeys)
+        .where(
+          and(eq(apiKeys.tokenPrefix, tokenPrefix), eq(apiKeys.isActive, true)),
+        );
+
+      if (candidates.length === 0) {
+        res.status(401).json({ error: "Invalid API key" });
+        return;
+      }
+
+      let matchedKey: (typeof candidates)[0] | null = null;
+      for (const candidate of candidates) {
+        if (await bcrypt.compare(token, candidate.tokenHash)) {
+          matchedKey = candidate;
+          break;
+        }
+      }
+
+      if (!matchedKey) {
+        res.status(401).json({ error: "Invalid API key" });
+        return;
+      }
+
+      if (matchedKey.expiresAt && new Date(matchedKey.expiresAt) < new Date()) {
+        res.status(401).json({ error: "API key has expired" });
+        return;
+      }
+
+      if (requireAdmin) {
+        const { users } = await import("../database/db/schema.js");
+        const userRows = await db
+          .select()
+          .from(users)
+          .where(eq(users.id, matchedKey.userId))
+          .limit(1);
+        if (!userRows[0]?.isAdmin) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
+      }
+
+      db.update(apiKeys)
+        .set({ lastUsedAt: new Date().toISOString() })
+        .where(eq(apiKeys.id, matchedKey.id))
+        .then(() => {})
+        .catch((err) => {
+          databaseLogger.warn("Failed to update API key lastUsedAt", {
+            operation: "api_key_update_last_used",
+            keyId: matchedKey!.id,
+            error: err instanceof Error ? err.message : "Unknown",
+          });
+        });
+
+      req.userId = matchedKey.userId;
+      next();
+    } catch (error) {
+      databaseLogger.error("API key authentication failed", error, {
+        operation: "api_key_auth_failed",
+      });
+      res.status(500).json({ error: "API key authentication failed" });
+    }
   }
 
   createAuthMiddleware() {
@@ -561,10 +819,24 @@ class AuthManager {
         return res.status(401).json({ error: "Missing authentication token" });
       }
 
+      if (token.startsWith("tmx_")) {
+        return this.handleApiKeyAuth(authReq, res, next, token);
+      }
+
       const payload = await this.verifyJWTToken(token);
 
       if (!payload) {
-        return res.status(401).json({ error: "Invalid token" });
+        return res
+          .clearCookie("jwt", this.getClearCookieOptions(req))
+          .status(401)
+          .json({ error: "Invalid token" });
+      }
+
+      if (payload.pendingTOTP) {
+        return res.status(401).json({
+          error: "TOTP verification required",
+          code: "TOTP_REQUIRED",
+        });
       }
 
       if (payload.sessionId) {
@@ -581,10 +853,13 @@ class AuthManager {
               sessionId: payload.sessionId,
               userId: payload.userId,
             });
-            return res.status(401).json({
-              error: "Session not found",
-              code: "SESSION_NOT_FOUND",
-            });
+            return res
+              .clearCookie("jwt", this.getClearCookieOptions(req))
+              .status(401)
+              .json({
+                error: "Session not found",
+                code: "SESSION_NOT_FOUND",
+              });
           }
 
           const session = sessionRecords[0];
@@ -641,10 +916,13 @@ class AuthManager {
                 );
               });
 
-            return res.status(401).json({
-              error: "Session has expired",
-              code: "SESSION_EXPIRED",
-            });
+            return res
+              .clearCookie("jwt", this.getClearCookieOptions(req))
+              .status(401)
+              .json({
+                error: "Session has expired",
+                code: "SESSION_EXPIRED",
+              });
           }
 
           db.update(sessions)
@@ -668,6 +946,7 @@ class AuthManager {
       }
 
       authReq.userId = payload.userId;
+      authReq.sessionId = payload.sessionId;
       authReq.pendingTOTP = payload.pendingTOTP;
       next();
     };
@@ -702,10 +981,30 @@ class AuthManager {
         return res.status(401).json({ error: "Missing authentication token" });
       }
 
+      if (token.startsWith("tmx_")) {
+        return this.handleApiKeyAuth(
+          req as AuthenticatedRequest,
+          res,
+          next,
+          token,
+          true,
+        );
+      }
+
       const payload = await this.verifyJWTToken(token);
 
       if (!payload) {
-        return res.status(401).json({ error: "Invalid token" });
+        return res
+          .clearCookie("jwt", this.getClearCookieOptions(req))
+          .status(401)
+          .json({ error: "Invalid token" });
+      }
+
+      if (payload.pendingTOTP) {
+        return res.status(401).json({
+          error: "TOTP verification required",
+          code: "TOTP_REQUIRED",
+        });
       }
 
       try {
@@ -732,6 +1031,7 @@ class AuthManager {
 
         const authReq = req as AuthenticatedRequest;
         authReq.userId = payload.userId;
+        authReq.sessionId = payload.sessionId;
         authReq.pendingTOTP = payload.pendingTOTP;
         next();
       } catch (error) {
@@ -785,6 +1085,22 @@ class AuthManager {
         });
       }
     } else {
+      try {
+        await db.delete(sessions).where(eq(sessions.userId, userId));
+
+        try {
+          const { saveMemoryDatabaseToFile } =
+            await import("../database/db/index.js");
+          await saveMemoryDatabaseToFile();
+        } catch {
+          // best effort
+        }
+      } catch (error) {
+        databaseLogger.error("Failed to revoke all sessions on logout", error, {
+          operation: "session_revoke_all_failed",
+          userId,
+        });
+      }
       this.userCrypto.logoutUser(userId);
     }
   }

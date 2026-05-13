@@ -1,5 +1,6 @@
 import type { Client } from "ssh2";
 import type { Request } from "express";
+import type { RefObject } from "react";
 
 // ============================================================================
 // HOST TYPES (SSH, RDP, VNC, Telnet)
@@ -74,6 +75,13 @@ export interface Host {
   socks5Password?: string;
   socks5ProxyChain?: ProxyNode[];
 
+  macAddress?: string;
+  portKnockSequence?: Array<{
+    port: number;
+    protocol?: "tcp" | "udp";
+    delay?: number;
+  }>;
+
   connectionType?: "ssh" | "rdp" | "vnc" | "telnet";
   domain?: string;
   security?: string;
@@ -82,6 +90,10 @@ export interface Host {
 
   createdAt: string;
   updatedAt: string;
+
+  hasPassword?: boolean;
+  hasKey?: boolean;
+  hasSudoPassword?: boolean;
 
   isShared?: boolean;
   permissionLevel?: "view";
@@ -145,6 +157,13 @@ export interface HostData {
   socks5Username?: string;
   socks5Password?: string;
   socks5ProxyChain?: ProxyNode[];
+
+  macAddress?: string;
+  portKnockSequence?: Array<{
+    port: number;
+    protocol?: "tcp" | "udp";
+    delay?: number;
+  }>;
 
   connectionType?: "ssh" | "rdp" | "vnc" | "telnet";
   domain?: string;
@@ -230,11 +249,20 @@ export interface CredentialData {
 // TUNNEL TYPES
 // ============================================================================
 
+export type TunnelScope = "s2s" | "c2s";
+export type TunnelMode = "local" | "remote" | "dynamic";
+
 export interface TunnelConnection {
+  scope?: TunnelScope;
+  mode?: TunnelMode;
   tunnelType?: "local" | "remote";
+  bindHost?: string;
+  sourceHostId?: number;
+  sourceHostName?: string;
   sourcePort: number;
   endpointPort: number;
-  endpointHost: string;
+  endpointHost?: string;
+  targetHost?: string;
 
   endpointPassword?: string;
   endpointKey?: string;
@@ -249,7 +277,11 @@ export interface TunnelConnection {
 
 export interface TunnelConfig {
   name: string;
+  scope?: TunnelScope;
+  mode?: TunnelMode;
   tunnelType?: "local" | "remote";
+  bindHost?: string;
+  targetHost?: string;
 
   sourceHostId: number;
   tunnelIndex: number;
@@ -293,6 +325,17 @@ export interface TunnelConfig {
   socks5ProxyChain?: ProxyNode[];
 }
 
+export interface C2STunnelPreset {
+  id: number;
+  userId: string;
+  name: string;
+  config: TunnelConnection[];
+  platform?: string | null;
+  computerName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TunnelStatus {
   connected: boolean;
   status: ConnectionState;
@@ -307,7 +350,7 @@ export interface TunnelStatus {
     type: "info" | "success" | "warning" | "error";
     stage: string;
     message: string;
-    details?: Record<string, any>;
+    details?: Record<string, unknown>;
   }>;
 }
 
@@ -425,6 +468,7 @@ export interface TerminalConfig {
   sudoPasswordAutoFill: boolean;
   keepaliveInterval?: number;
   keepaliveCountMax?: number;
+  autoTmux: boolean;
 }
 
 // ============================================================================
@@ -450,12 +494,22 @@ export interface TabContextTab {
     | "telnet";
   title: string;
   hostConfig?: SSHHost;
-  terminalRef?: any;
+  terminalRef?: RefObject<TerminalRefHandle | null>;
   initialTab?: string;
   _updateTimestamp?: number;
   connectionConfig?: Record<string, unknown>;
   persistentSessionId?: string;
   executeCommand?: string;
+}
+
+export interface TerminalRefHandle {
+  disconnect?: () => void;
+  reconnect?: () => void;
+  fit?: () => void;
+  sendInput?: (data: string) => void;
+  notifyResize?: () => void;
+  refresh?: () => void;
+  openFileManager?: () => void;
 }
 
 export type SplitLayout = "2h" | "2v" | "3l" | "3r" | "3t" | "4grid";
@@ -699,6 +753,7 @@ export type PartialExcept<T, K extends keyof T> = Partial<T> & Pick<T, K>;
 
 export interface AuthenticatedRequest extends Request {
   userId: string;
+  sessionId?: string;
   user?: {
     id: string;
     username: string;

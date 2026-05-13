@@ -1,54 +1,19 @@
 import React from "react";
 import { Button } from "@/components/ui/button.tsx";
-import { Label } from "@/components/ui/label.tsx";
-import { PasswordInput } from "@/components/ui/password-input.tsx";
 import { Download, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { isElectron } from "@/ui/main-axios.ts";
 import { getBasePath } from "@/lib/base-path";
 
-interface DatabaseSecurityTabProps {
-  currentUser: {
-    is_oidc: boolean;
-  } | null;
-}
-
-export function DatabaseSecurityTab({
-  currentUser,
-}: DatabaseSecurityTabProps): React.ReactElement {
+export function DatabaseSecurityTab(): React.ReactElement {
   const { t } = useTranslation();
 
   const [exportLoading, setExportLoading] = React.useState(false);
   const [importLoading, setImportLoading] = React.useState(false);
   const [importFile, setImportFile] = React.useState<File | null>(null);
-  const [exportPassword, setExportPassword] = React.useState("");
-  const [showPasswordInput, setShowPasswordInput] = React.useState(false);
-  const [importPassword, setImportPassword] = React.useState("");
-
-  const requiresImportPassword = React.useMemo(
-    () => !currentUser?.is_oidc,
-    [currentUser?.is_oidc],
-  );
-
-  const requiresExportPassword = React.useMemo(
-    () => !currentUser?.is_oidc,
-    [currentUser?.is_oidc],
-  );
 
   const handleExportDatabase = async () => {
-    if (requiresExportPassword) {
-      if (!showPasswordInput) {
-        setShowPasswordInput(true);
-        return;
-      }
-
-      if (!exportPassword.trim()) {
-        toast.error(t("admin.passwordRequired"));
-        return;
-      }
-    }
-
     setExportLoading(true);
     try {
       const isDev =
@@ -66,15 +31,15 @@ export function DatabaseSecurityTab({
           ? `http://localhost:30001/database/export`
           : `${window.location.protocol}//${window.location.host}${getBasePath()}/database/export`;
 
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+
       const response = await fetch(apiUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers,
         credentials: "include",
-        body: JSON.stringify(
-          requiresExportPassword ? { password: exportPassword } : {},
-        ),
+        body: JSON.stringify({}),
       });
 
       if (response.ok) {
@@ -94,15 +59,9 @@ export function DatabaseSecurityTab({
         document.body.removeChild(a);
 
         toast.success(t("admin.databaseExportedSuccessfully"));
-        setExportPassword("");
-        setShowPasswordInput(false);
       } else {
         const error = await response.json();
-        if (error.code === "PASSWORD_REQUIRED") {
-          toast.error(t("admin.passwordRequired"));
-        } else {
-          toast.error(error.error || t("admin.databaseExportFailed"));
-        }
+        toast.error(error.error || t("admin.databaseExportFailed"));
       }
     } catch {
       toast.error(t("admin.databaseExportFailed"));
@@ -114,11 +73,6 @@ export function DatabaseSecurityTab({
   const handleImportDatabase = async () => {
     if (!importFile) {
       toast.error(t("admin.pleaseSelectImportFile"));
-      return;
-    }
-
-    if (requiresImportPassword && !importPassword.trim()) {
-      toast.error(t("admin.passwordRequired"));
       return;
     }
 
@@ -141,9 +95,6 @@ export function DatabaseSecurityTab({
 
       const formData = new FormData();
       formData.append("file", importFile);
-      if (requiresImportPassword) {
-        formData.append("password", importPassword);
-      }
 
       const response = await fetch(apiUrl, {
         method: "POST",
@@ -181,7 +132,6 @@ export function DatabaseSecurityTab({
             `Import completed: ${imported} items imported${details.length > 0 ? ` (${details.join(", ")})` : ""}, ${skipped} items skipped`,
           );
           setImportFile(null);
-          setImportPassword("");
 
           setTimeout(() => {
             window.location.reload();
@@ -193,11 +143,7 @@ export function DatabaseSecurityTab({
         }
       } else {
         const error = await response.json();
-        if (error.code === "PASSWORD_REQUIRED") {
-          toast.error(t("admin.passwordRequired"));
-        } else {
-          toast.error(error.error || t("admin.databaseImportFailed"));
-        }
+        toast.error(error.error || t("admin.databaseImportFailed"));
       }
     } catch {
       toast.error(t("admin.databaseImportFailed"));
@@ -220,45 +166,13 @@ export function DatabaseSecurityTab({
             <p className="text-xs text-muted-foreground">
               {t("admin.exportDescription")}
             </p>
-            {showPasswordInput && requiresExportPassword && (
-              <div className="space-y-2">
-                <Label htmlFor="export-password">Password</Label>
-                <PasswordInput
-                  id="export-password"
-                  value={exportPassword}
-                  onChange={(e) => setExportPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleExportDatabase();
-                    }
-                  }}
-                />
-              </div>
-            )}
             <Button
               onClick={handleExportDatabase}
               disabled={exportLoading}
               className="w-full"
             >
-              {exportLoading
-                ? t("admin.exporting")
-                : showPasswordInput && requiresExportPassword
-                  ? t("admin.confirmExport")
-                  : t("admin.export")}
+              {exportLoading ? t("admin.exporting") : t("admin.export")}
             </Button>
-            {showPasswordInput && requiresExportPassword && (
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setShowPasswordInput(false);
-                  setExportPassword("");
-                }}
-                className="w-full"
-              >
-                Cancel
-              </Button>
-            )}
           </div>
         </div>
 
@@ -294,29 +208,9 @@ export function DatabaseSecurityTab({
                 </span>
               </Button>
             </div>
-            {importFile && requiresImportPassword && (
-              <div className="space-y-2">
-                <Label htmlFor="import-password">Password</Label>
-                <PasswordInput
-                  id="import-password"
-                  value={importPassword}
-                  onChange={(e) => setImportPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleImportDatabase();
-                    }
-                  }}
-                />
-              </div>
-            )}
             <Button
               onClick={handleImportDatabase}
-              disabled={
-                importLoading ||
-                !importFile ||
-                (requiresImportPassword && !importPassword.trim())
-              }
+              disabled={importLoading || !importFile}
               className="w-full"
             >
               {importLoading ? t("admin.importing") : t("admin.import")}

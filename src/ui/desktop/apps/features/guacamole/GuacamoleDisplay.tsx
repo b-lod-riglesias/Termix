@@ -62,10 +62,15 @@ export const GuacamoleDisplay = forwardRef<
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const displayRef = useRef<HTMLDivElement>(null);
+  const displayElementRef = useRef<HTMLElement | null>(null);
   const clientRef = useRef<Guacamole.Client | null>(null);
+  const keyboardRef = useRef<Guacamole.Keyboard | null>(null);
   const scaleRef = useRef<number>(1);
   const resizeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const [isConnecting, setIsConnecting] = useState(false);
+  const hasKeyboardFocusRef = useRef(false);
+  const windowFocusedRef = useRef(
+    typeof document === "undefined" ? true : document.hasFocus(),
+  );
   const [isReady, setIsReady] = useState(false);
 
   useImperativeHandle(ref, () => ({
@@ -109,6 +114,7 @@ export const GuacamoleDisplay = forwardRef<
     ): Promise<string | null> => {
       try {
         let token: string;
+        const protocol = connectionConfig.protocol ?? connectionConfig.type;
 
         if (connectionConfig.token) {
           token = connectionConfig.token;
@@ -140,19 +146,11 @@ export const GuacamoleDisplay = forwardRef<
             body: JSON.stringify(connectionConfig),
             credentials: "include",
           });
-
-          if (!response.ok) {
-            const err = await response.json();
-            throw new Error(err.error || "Failed to get connection token");
-          }
-
-          const data = await response.json();
           token = data.token;
         }
 
-        const width = connectionConfig.width || containerWidth || 1280;
-        const height = connectionConfig.height || containerHeight || 720;
-        const dpi = connectionConfig.dpi || 96;
+        const width = connectionConfig.width ?? containerWidth ?? 1280;
+        const height = connectionConfig.height ?? containerHeight ?? 720;
 
         const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
         const browserHost = window.location.hostname || "127.0.0.1";
@@ -170,7 +168,12 @@ export const GuacamoleDisplay = forwardRef<
               })()
             : proxyWsUrl;
 
-        return `${wsBase}?token=${encodeURIComponent(token)}&width=${width}&height=${height}&dpi=${dpi}`;
+        const params = new URLSearchParams({
+          token,
+          width: String(width),
+          height: String(height),
+        });
+        return `${wsBase}?${params.toString()}`;
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : "Unknown error";
@@ -180,6 +183,63 @@ export const GuacamoleDisplay = forwardRef<
     },
     [connectionConfig, onError],
   );
+
+  const refreshKeyboardHandlers = useCallback(() => {
+    const keyboard = keyboardRef.current;
+    const client = clientRef.current;
+    const displayElement = displayElementRef.current;
+
+    if (!keyboard) return;
+
+    const documentVisible =
+      typeof document === "undefined" || document.visibilityState === "visible";
+    const displayIsFocused =
+      !!displayElement &&
+      typeof document !== "undefined" &&
+      document.activeElement === displayElement;
+    const shouldCaptureInput =
+      !!client &&
+      !!displayElement &&
+      isVisible &&
+      documentVisible &&
+      windowFocusedRef.current &&
+      (hasKeyboardFocusRef.current || displayIsFocused);
+
+    if (!shouldCaptureInput) {
+      keyboard.onkeydown = null;
+      keyboard.onkeyup = null;
+      keyboard.reset();
+      return;
+    }
+
+    keyboard.onkeydown = (keysym: number) => {
+      if (!clientRef.current) return;
+      if (!isVisible || !windowFocusedRef.current) return;
+
+      const activeDisplay = displayElementRef.current;
+      const stillFocused =
+        !!activeDisplay &&
+        typeof document !== "undefined" &&
+        document.activeElement === activeDisplay;
+
+      if (!hasKeyboardFocusRef.current && !stillFocused) return;
+      clientRef.current.sendKeyEvent(1, keysym);
+    };
+
+    keyboard.onkeyup = (keysym: number) => {
+      if (!clientRef.current) return;
+      if (!isVisible || !windowFocusedRef.current) return;
+
+      const activeDisplay = displayElementRef.current;
+      const stillFocused =
+        !!activeDisplay &&
+        typeof document !== "undefined" &&
+        document.activeElement === activeDisplay;
+
+      if (!hasKeyboardFocusRef.current && !stillFocused) return;
+      clientRef.current.sendKeyEvent(0, keysym);
+    };
+  }, [isVisible]);
 
   const rescaleDisplay = useCallback((immediate: boolean = false) => {
     if (!clientRef.current || !containerRef.current) return;
@@ -213,7 +273,6 @@ export const GuacamoleDisplay = forwardRef<
   const connect = useCallback(async () => {
     if (isConnectingRef.current) return;
     isConnectingRef.current = true;
-    setIsConnecting(true);
     setIsReady(false);
 
     let containerWidth = containerRef.current?.clientWidth || 0;
@@ -227,7 +286,6 @@ export const GuacamoleDisplay = forwardRef<
     const wsUrl = await getWebSocketUrl(containerWidth, containerHeight);
     if (!wsUrl) {
       isConnectingRef.current = false;
-      setIsConnecting(false);
       return;
     }
 
@@ -237,11 +295,15 @@ export const GuacamoleDisplay = forwardRef<
 
     const display = client.getDisplay();
     const displayElement = display.getElement();
+    displayElementRef.current = displayElement;
 
     if (displayRef.current) {
       displayRef.current.innerHTML = "";
       displayRef.current.appendChild(displayElement);
     }
+
+    displayElement.setAttribute("tabindex", "0");
+    displayElement.style.outline = "none";
 
     display.onresize = () => {
       rescaleDisplay(true);
@@ -250,6 +312,7 @@ export const GuacamoleDisplay = forwardRef<
 
     const mouse = new Guacamole.Mouse(displayElement);
     const sendMouseState = (state: Guacamole.Mouse.State) => {
+      displayElement.focus({ preventScroll: true });
       const scale = scaleRef.current;
       const adjustedX = Math.round(state.x / scale);
       const adjustedY = Math.round(state.y / scale);
@@ -268,34 +331,42 @@ export const GuacamoleDisplay = forwardRef<
     };
     mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = sendMouseState;
 
-    const keyboard = new Guacamole.Keyboard(document);
-    keyboard.onkeydown = (keysym: number) => {
-      client.sendKeyEvent(1, keysym);
+    const keyboard = new Guacamole.Keyboard(displayElement);
+    keyboardRef.current = keyboard;
+
+    const handleDisplayFocus = () => {
+      hasKeyboardFocusRef.current = true;
+      refreshKeyboardHandlers();
     };
-    keyboard.onkeyup = (keysym: number) => {
-      client.sendKeyEvent(0, keysym);
+
+    const handleDisplayBlur = () => {
+      hasKeyboardFocusRef.current = false;
+      refreshKeyboardHandlers();
     };
+
+    displayElement.addEventListener("focus", handleDisplayFocus);
+    displayElement.addEventListener("blur", handleDisplayBlur);
+    displayElement.addEventListener("mousedown", handleDisplayFocus);
+    refreshKeyboardHandlers();
 
     client.onstatechange = (state: number) => {
       switch (state) {
         case 0:
           break;
         case 1:
-          setIsConnecting(true);
           break;
         case 2:
           break;
         case 3:
-          setIsConnecting(false);
+          setIsReady(true);
           onConnect?.();
           break;
         case 4:
           break;
         case 5:
-          setIsConnecting(false);
           setIsReady(false);
-          keyboard.onkeydown = null;
-          keyboard.onkeyup = null;
+          hasKeyboardFocusRef.current = false;
+          refreshKeyboardHandlers();
           onDisconnect?.();
           break;
       }
@@ -303,7 +374,6 @@ export const GuacamoleDisplay = forwardRef<
 
     client.onerror = (error: Guacamole.Status) => {
       const errorMessage = error.message || "Connection error";
-      setIsConnecting(false);
       setIsReady(false);
       onError?.(errorMessage);
     };
@@ -321,8 +391,19 @@ export const GuacamoleDisplay = forwardRef<
       }
     };
 
+    client.onaudio = (stream: Guacamole.InputStream, mimetype: string) => {
+      Guacamole.AudioPlayer.getInstance(stream, mimetype);
+    };
+
     client.connect();
-  }, [getWebSocketUrl, onConnect, onDisconnect, onError, rescaleDisplay]);
+  }, [
+    getWebSocketUrl,
+    onConnect,
+    onDisconnect,
+    onError,
+    refreshKeyboardHandlers,
+    rescaleDisplay,
+  ]);
 
   const hasInitiatedRef = useRef(false);
   const isMountedRef = useRef(false);
@@ -342,6 +423,46 @@ export const GuacamoleDisplay = forwardRef<
   }, [isVisible, connect]);
 
   useEffect(() => {
+    if (!isVisible) {
+      hasKeyboardFocusRef.current = false;
+    }
+
+    refreshKeyboardHandlers();
+  }, [isVisible, refreshKeyboardHandlers]);
+
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      windowFocusedRef.current = true;
+      refreshKeyboardHandlers();
+    };
+
+    const handleWindowBlur = () => {
+      windowFocusedRef.current = false;
+      hasKeyboardFocusRef.current = false;
+      refreshKeyboardHandlers();
+    };
+
+    const handleVisibilityChange = () => {
+      windowFocusedRef.current =
+        document.visibilityState === "visible" && document.hasFocus();
+      if (document.visibilityState !== "visible") {
+        hasKeyboardFocusRef.current = false;
+      }
+      refreshKeyboardHandlers();
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [refreshKeyboardHandlers]);
+
+  useEffect(() => {
     return () => {
       isMountedRef.current = false;
       hasInitiatedRef.current = false;
@@ -353,6 +474,7 @@ export const GuacamoleDisplay = forwardRef<
         clientRef.current.disconnect();
         clientRef.current = null;
       }
+      displayElementRef.current = null;
     };
   }, []);
 
@@ -361,6 +483,14 @@ export const GuacamoleDisplay = forwardRef<
 
     const resizeObserver = new ResizeObserver(() => {
       rescaleDisplay(false);
+      if (resizeTimeoutRef.current) clearTimeout(resizeTimeoutRef.current);
+      resizeTimeoutRef.current = setTimeout(() => {
+        if (clientRef.current && containerRef.current) {
+          const w = containerRef.current.clientWidth;
+          const h = containerRef.current.clientHeight;
+          if (w > 0 && h > 0) clientRef.current.sendSize(w, h);
+        }
+      }, 200);
     });
 
     resizeObserver.observe(containerRef.current);
@@ -372,6 +502,40 @@ export const GuacamoleDisplay = forwardRef<
       clearTimeout(initialTimeout);
     };
   }, [rescaleDisplay]);
+
+  const syncClipboard = useCallback(() => {
+    const client = clientRef.current;
+    if (!client) return;
+    navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) {
+          const stream = client.createClipboardStream("text/plain");
+          const writer = new Guacamole.StringWriter(stream);
+          writer.sendText(text);
+          writer.sendEnd();
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (isVisible && isReady) {
+      syncClipboard();
+    }
+  }, [isVisible, isReady, syncClipboard]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !isReady) return;
+
+    const handleFocus = () => syncClipboard();
+    container.addEventListener("mouseenter", handleFocus);
+
+    return () => {
+      container.removeEventListener("mouseenter", handleFocus);
+    };
+  }, [isReady, syncClipboard]);
 
   const connectingMessage = t("guacamole.connecting", {
     type: (

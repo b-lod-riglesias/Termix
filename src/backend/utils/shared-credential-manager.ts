@@ -399,7 +399,7 @@ class SharedCredentialManager {
             cred.keyPassword,
             ownerDEK,
             credentialId,
-            "key_password",
+            "keyPassword",
           )
         : undefined,
       keyType: cred.keyType,

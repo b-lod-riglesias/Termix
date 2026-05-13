@@ -11,29 +11,19 @@ import { SSHToolsSidebar } from "@/ui/desktop/apps/tools/SSHToolsSidebar.tsx";
 import { useCommandHistory } from "@/ui/desktop/apps/features/terminal/command-history/CommandHistoryContext.tsx";
 import { QuickConnectDialog } from "@/ui/desktop/navigation/dialogs/QuickConnectDialog.tsx";
 
-interface TabData {
-  id: number;
-  type: string;
-  title: string;
-  terminalRef?: {
-    current?: {
-      sendInput?: (data: string) => void;
-    };
-  };
-  [key: string]: unknown;
-}
+import type { TabContextTab } from "@/types";
+
+type TabData = TabContextTab;
 
 interface TopNavbarProps {
   isTopbarOpen: boolean;
   setIsTopbarOpen: (open: boolean) => void;
-  onOpenCommandPalette: () => void;
   onRightSidebarStateChange?: (isOpen: boolean, width: number) => void;
 }
 
 export function TopNavbar({
   isTopbarOpen,
   setIsTopbarOpen,
-  onOpenCommandPalette,
   onRightSidebarStateChange,
 }: TopNavbarProps): React.ReactElement {
   const { state } = useSidebar();
@@ -174,7 +164,7 @@ export function TopNavbar({
   const handleSnippetExecute = (content: string) => {
     const tab = tabs.find((t: TabData) => t.id === currentTab);
     if (tab?.terminalRef?.current?.sendInput) {
-      tab.terminalRef.current.sendInput(content + "\n");
+      tab.terminalRef.current.sendInput(content + "\r");
     }
   };
 
@@ -443,12 +433,6 @@ export function TopNavbar({
 
   const isSplitScreenActive =
     Array.isArray(allSplitScreenTab) && allSplitScreenTab.length > 0;
-  const currentTabObj = tabs.find((t: TabData) => t.id === currentTab);
-  const currentTabIsHome = currentTabObj?.type === "home";
-  const currentTabIsSshManager = currentTabObj?.type === "ssh_manager";
-  const currentTabIsAdmin = currentTabObj?.type === "admin";
-  const currentTabIsUserProfile = currentTabObj?.type === "user_profile";
-
   return (
     <div>
       <div
@@ -482,6 +466,7 @@ export function TopNavbar({
             const isUserProfile = tab.type === "user_profile";
             const isRdp = tab.type === "rdp";
             const isVnc = tab.type === "vnc";
+            const isTelnet = tab.type === "telnet";
             const isSplittable =
               isTerminal || isServer || isFileManager || isTunnel || isDocker;
             const disableSplit = !isSplittable;
@@ -497,7 +482,6 @@ export function TopNavbar({
             const disableClose = isHome;
 
             const isDraggingThisTab = dragState.draggedIndex === index;
-            const isTheDraggedTab = tab.id === dragState.draggedId;
             const isDroppedAndSnapping = tab.id === justDroppedTabId;
             const dragOffset = isDraggingThisTab
               ? dragState.currentX - dragState.startX
@@ -560,7 +544,6 @@ export function TopNavbar({
                 onDragOver={handleDragOver}
                 onDrop={handleDrop}
                 onDragEnd={handleDragEnd}
-                e
                 onMouseDown={(e) => {
                   if (e.button === 1 && !disableClose) {
                     e.preventDefault();
@@ -603,13 +586,12 @@ export function TopNavbar({
                     isUserProfile ||
                     isRdp ||
                     isVnc ||
+                    isTelnet ||
                     tab.type === "network_graph"
                       ? () => handleTabClose(tab.id)
                       : undefined
                   }
-                  onSplit={
-                    isSplittable ? () => handleTabSplit(tab.id) : undefined
-                  }
+                  onSplit={isSplittable ? handleTabSplit : undefined}
                   canSplit={isSplittable}
                   canClose={
                     isTerminal ||
@@ -622,6 +604,7 @@ export function TopNavbar({
                     isUserProfile ||
                     isRdp ||
                     isVnc ||
+                    isTelnet ||
                     tab.type === "network_graph"
                   }
                   disableActivate={disableActivate}
@@ -630,6 +613,11 @@ export function TopNavbar({
                   isDragging={isDraggingThisTab}
                   isDragOver={false}
                   hostConfig={tab.hostConfig}
+                  onOpenFileManager={
+                    isTerminal && (tab.hostConfig as any)?.enableFileManager
+                      ? () => tab.terminalRef?.current?.openFileManager?.()
+                      : undefined
+                  }
                 />
               </div>
             );

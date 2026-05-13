@@ -32,23 +32,19 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion.tsx";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert.tsx";
+import { Alert, AlertDescription } from "@/components/ui/alert.tsx";
 import { Separator } from "@/components/ui/separator.tsx";
 import { CredentialSelector } from "@/ui/desktop/apps/host-manager/credentials/CredentialSelector.tsx";
 import CodeMirror from "@uiw/react-codemirror";
 import { EditorView } from "@codemirror/view";
-import {
-  Plus,
-  X,
-  Upload,
-  AlertCircle,
-  ArrowRight,
-  Loader2,
-} from "lucide-react";
+import { Plus, X, ArrowRight, Loader2 } from "lucide-react";
 import type { HostGeneralTabProps } from "./shared/tab-types";
 import { JumpHostItem } from "./shared/JumpHostItem";
 import { testProxyConnection } from "@/ui/main-axios";
 import { toast } from "sonner";
+import type { ProxyNode } from "@/types";
+
+type JumpHostSelection = { hostId: number };
 
 export function HostGeneralTab({
   form,
@@ -76,7 +72,6 @@ export function HostGeneralTab({
   editorTheme,
   hosts,
   editingHost,
-  folders,
   credentials,
   t,
 }: HostGeneralTabProps) {
@@ -138,12 +133,12 @@ export function HostGeneralTab({
       t("hosts.connectionPath") === "Connection Path" ? "You" : "You",
     ];
     const useSocks5 = form.watch("useSocks5");
-    const jumpHosts = form.watch("jumpHosts") || [];
+    const jumpHosts = (form.watch("jumpHosts") || []) as JumpHostSelection[];
 
     if (useSocks5) {
       if (proxyMode === "chain") {
-        const chain = form.watch("socks5ProxyChain") || [];
-        chain.forEach((node: any, i: number) => {
+        const chain = (form.watch("socks5ProxyChain") || []) as ProxyNode[];
+        chain.forEach((node) => {
           if (node.host) {
             const typeLabel =
               node.type === "http" ? "HTTP" : `SOCKS${node.type}`;
@@ -160,8 +155,8 @@ export function HostGeneralTab({
     }
 
     if (jumpHosts.length > 0 && hosts) {
-      jumpHosts.forEach((jh: any) => {
-        const found = hosts.find((h: any) => h.id === jh.hostId);
+      jumpHosts.forEach((jh) => {
+        const found = hosts.find((h) => h.id === jh.hostId);
         if (found) {
           parts.push(`Jump: ${found.name || found.ip}`);
         }
@@ -176,6 +171,9 @@ export function HostGeneralTab({
 
     return parts;
   };
+
+  const socks5ProxyChain = (form.watch("socks5ProxyChain") ||
+    []) as ProxyNode[];
 
   return (
     <div className="pt-2">
@@ -267,6 +265,28 @@ export function HostGeneralTab({
               </FormItem>
             );
           }}
+        />
+      </div>
+      <div className="grid grid-cols-12 gap-4 mt-3">
+        <FormField
+          control={form.control}
+          name="macAddress"
+          render={({ field }) => (
+            <FormItem className="col-span-5">
+              <FormLabel>{t("hosts.macAddress")}</FormLabel>
+              <FormControl>
+                <Input
+                  placeholder="AA:BB:CC:DD:EE:FF"
+                  {...field}
+                  onBlur={(e) => {
+                    field.onChange(e.target.value.trim());
+                    field.onBlur();
+                  }}
+                />
+              </FormControl>
+              <FormDescription>{t("hosts.macAddressDesc")}</FormDescription>
+            </FormItem>
+          )}
         />
       </div>
       <FormLabel className="mb-3 mt-3 font-bold">
@@ -1186,200 +1206,180 @@ export function HostGeneralTab({
                           </Button>
                         </div>
 
-                        {(form.watch("socks5ProxyChain") || []).length ===
-                          0 && (
+                        {socks5ProxyChain.length === 0 && (
                           <div className="text-sm text-muted-foreground text-center p-4 border rounded-lg border-dashed">
                             {t("hosts.noProxyNodes")}
                           </div>
                         )}
 
-                        {(form.watch("socks5ProxyChain") || []).map(
-                          (node: any, index: number) => (
-                            <div
-                              key={index}
-                              className="p-4 border rounded-lg space-y-3 relative"
-                            >
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-sm font-medium">
-                                  {t("hosts.proxyNode")} {index + 1}
-                                </span>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => {
-                                    const currentChain =
-                                      form.watch("socks5ProxyChain") || [];
-                                    form.setValue(
-                                      "socks5ProxyChain",
-                                      currentChain.filter(
-                                        (_: any, i: number) => i !== index,
-                                      ),
-                                    );
-                                  }}
-                                >
-                                  <X className="h-4 w-4" />
-                                </Button>
-                              </div>
+                        {socks5ProxyChain.map((node, index) => (
+                          <div
+                            key={index}
+                            className="p-4 border rounded-lg space-y-3 relative"
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-sm font-medium">
+                                {t("hosts.proxyNode")} {index + 1}
+                              </span>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => {
+                                  const currentChain =
+                                    form.watch("socks5ProxyChain") || [];
+                                  form.setValue(
+                                    "socks5ProxyChain",
+                                    currentChain.filter(
+                                      (_node: ProxyNode, i: number) =>
+                                        i !== index,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
 
-                              <div className="grid grid-cols-2 gap-3">
-                                <div className="space-y-2">
-                                  <FormLabel>{t("hosts.socks5Host")}</FormLabel>
-                                  <Input
-                                    placeholder={t("placeholders.socks5Host")}
-                                    value={node.host}
-                                    onChange={(e) => {
-                                      const currentChain =
-                                        form.watch("socks5ProxyChain") || [];
-                                      const newChain = [...currentChain];
-                                      newChain[index] = {
-                                        ...newChain[index],
-                                        host: e.target.value,
-                                      };
-                                      form.setValue(
-                                        "socks5ProxyChain",
-                                        newChain,
-                                      );
-                                    }}
-                                    onBlur={(e) => {
-                                      const currentChain =
-                                        form.watch("socks5ProxyChain") || [];
-                                      const newChain = [...currentChain];
-                                      newChain[index] = {
-                                        ...newChain[index],
-                                        host: e.target.value.trim(),
-                                      };
-                                      form.setValue(
-                                        "socks5ProxyChain",
-                                        newChain,
-                                      );
-                                    }}
-                                  />
-                                </div>
-
-                                <div className="space-y-2">
-                                  <FormLabel>{t("hosts.socks5Port")}</FormLabel>
-                                  <Input
-                                    type="number"
-                                    placeholder={t("placeholders.socks5Port")}
-                                    value={node.port}
-                                    onChange={(e) => {
-                                      const currentChain =
-                                        form.watch("socks5ProxyChain") || [];
-                                      const newChain = [...currentChain];
-                                      newChain[index] = {
-                                        ...newChain[index],
-                                        port: parseInt(e.target.value) || 1080,
-                                      };
-                                      form.setValue(
-                                        "socks5ProxyChain",
-                                        newChain,
-                                      );
-                                    }}
-                                  />
-                                </div>
-                              </div>
-
+                            <div className="grid grid-cols-2 gap-3">
                               <div className="space-y-2">
-                                <FormLabel>{t("hosts.proxyType")}</FormLabel>
-                                <Select
-                                  value={String(node.type)}
-                                  onValueChange={(value) => {
+                                <FormLabel>{t("hosts.socks5Host")}</FormLabel>
+                                <Input
+                                  placeholder={t("placeholders.socks5Host")}
+                                  value={node.host}
+                                  onChange={(e) => {
                                     const currentChain =
                                       form.watch("socks5ProxyChain") || [];
                                     const newChain = [...currentChain];
                                     newChain[index] = {
                                       ...newChain[index],
-                                      type:
-                                        value === "http"
-                                          ? ("http" as const)
-                                          : (parseInt(value) as 4 | 5),
+                                      host: e.target.value,
                                     };
                                     form.setValue("socks5ProxyChain", newChain);
                                   }}
-                                >
-                                  <SelectTrigger>
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="4">
-                                      {t("hosts.socks4")}
-                                    </SelectItem>
-                                    <SelectItem value="5">
-                                      {t("hosts.socks5")}
-                                    </SelectItem>
-                                    <SelectItem value="http">
-                                      {t("hosts.httpConnect")}
-                                    </SelectItem>
-                                  </SelectContent>
-                                </Select>
+                                  onBlur={(e) => {
+                                    const currentChain =
+                                      form.watch("socks5ProxyChain") || [];
+                                    const newChain = [...currentChain];
+                                    newChain[index] = {
+                                      ...newChain[index],
+                                      host: e.target.value.trim(),
+                                    };
+                                    form.setValue("socks5ProxyChain", newChain);
+                                  }}
+                                />
                               </div>
 
-                              <div className="grid grid-cols-2 gap-3">
-                                <div className="space-y-2">
-                                  <FormLabel>
-                                    {t("hosts.socks5Username")}{" "}
-                                    {t("hosts.optional")}
-                                  </FormLabel>
-                                  <Input
-                                    placeholder={t("hosts.username")}
-                                    value={node.username || ""}
-                                    onChange={(e) => {
-                                      const currentChain =
-                                        form.watch("socks5ProxyChain") || [];
-                                      const newChain = [...currentChain];
-                                      newChain[index] = {
-                                        ...newChain[index],
-                                        username: e.target.value,
-                                      };
-                                      form.setValue(
-                                        "socks5ProxyChain",
-                                        newChain,
-                                      );
-                                    }}
-                                    onBlur={(e) => {
-                                      const currentChain =
-                                        form.watch("socks5ProxyChain") || [];
-                                      const newChain = [...currentChain];
-                                      newChain[index] = {
-                                        ...newChain[index],
-                                        username: e.target.value.trim(),
-                                      };
-                                      form.setValue(
-                                        "socks5ProxyChain",
-                                        newChain,
-                                      );
-                                    }}
-                                  />
-                                </div>
-
-                                <div className="space-y-2">
-                                  <FormLabel>
-                                    {t("hosts.socks5Password")}{" "}
-                                    {t("hosts.optional")}
-                                  </FormLabel>
-                                  <PasswordInput
-                                    placeholder={t("hosts.password")}
-                                    value={node.password || ""}
-                                    onChange={(e) => {
-                                      const currentChain =
-                                        form.watch("socks5ProxyChain") || [];
-                                      const newChain = [...currentChain];
-                                      newChain[index] = {
-                                        ...newChain[index],
-                                        password: e.target.value,
-                                      };
-                                      form.setValue(
-                                        "socks5ProxyChain",
-                                        newChain,
-                                      );
-                                    }}
-                                  />
-                                </div>
+                              <div className="space-y-2">
+                                <FormLabel>{t("hosts.socks5Port")}</FormLabel>
+                                <Input
+                                  type="number"
+                                  placeholder={t("placeholders.socks5Port")}
+                                  value={node.port}
+                                  onChange={(e) => {
+                                    const currentChain =
+                                      form.watch("socks5ProxyChain") || [];
+                                    const newChain = [...currentChain];
+                                    newChain[index] = {
+                                      ...newChain[index],
+                                      port: parseInt(e.target.value) || 1080,
+                                    };
+                                    form.setValue("socks5ProxyChain", newChain);
+                                  }}
+                                />
                               </div>
                             </div>
-                          ),
-                        )}
+
+                            <div className="space-y-2">
+                              <FormLabel>{t("hosts.proxyType")}</FormLabel>
+                              <Select
+                                value={String(node.type)}
+                                onValueChange={(value) => {
+                                  const currentChain =
+                                    form.watch("socks5ProxyChain") || [];
+                                  const newChain = [...currentChain];
+                                  newChain[index] = {
+                                    ...newChain[index],
+                                    type:
+                                      value === "http"
+                                        ? ("http" as const)
+                                        : (parseInt(value) as 4 | 5),
+                                  };
+                                  form.setValue("socks5ProxyChain", newChain);
+                                }}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="4">
+                                    {t("hosts.socks4")}
+                                  </SelectItem>
+                                  <SelectItem value="5">
+                                    {t("hosts.socks5")}
+                                  </SelectItem>
+                                  <SelectItem value="http">
+                                    {t("hosts.httpConnect")}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="space-y-2">
+                                <FormLabel>
+                                  {t("hosts.socks5Username")}{" "}
+                                  {t("hosts.optional")}
+                                </FormLabel>
+                                <Input
+                                  placeholder={t("hosts.username")}
+                                  value={node.username || ""}
+                                  onChange={(e) => {
+                                    const currentChain =
+                                      form.watch("socks5ProxyChain") || [];
+                                    const newChain = [...currentChain];
+                                    newChain[index] = {
+                                      ...newChain[index],
+                                      username: e.target.value,
+                                    };
+                                    form.setValue("socks5ProxyChain", newChain);
+                                  }}
+                                  onBlur={(e) => {
+                                    const currentChain =
+                                      form.watch("socks5ProxyChain") || [];
+                                    const newChain = [...currentChain];
+                                    newChain[index] = {
+                                      ...newChain[index],
+                                      username: e.target.value.trim(),
+                                    };
+                                    form.setValue("socks5ProxyChain", newChain);
+                                  }}
+                                />
+                              </div>
+
+                              <div className="space-y-2">
+                                <FormLabel>
+                                  {t("hosts.socks5Password")}{" "}
+                                  {t("hosts.optional")}
+                                </FormLabel>
+                                <PasswordInput
+                                  placeholder={t("hosts.password")}
+                                  value={node.password || ""}
+                                  onChange={(e) => {
+                                    const currentChain =
+                                      form.watch("socks5ProxyChain") || [];
+                                    const newChain = [...currentChain];
+                                    newChain[index] = {
+                                      ...newChain[index],
+                                      password: e.target.value,
+                                    };
+                                    form.setValue("socks5ProxyChain", newChain);
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     )}
 
@@ -1436,6 +1436,120 @@ export function HostGeneralTab({
                     })()}
                   </div>
                 )}
+              </AccordionContent>
+            </AccordionItem>
+
+            <AccordionItem value="port-knocking">
+              <AccordionTrigger>{t("hosts.portKnocking")}</AccordionTrigger>
+              <AccordionContent className="space-y-3 pt-2">
+                <p className="text-sm text-muted-foreground">
+                  {t("hosts.portKnockingDesc")}
+                </p>
+                <Controller
+                  control={form.control}
+                  name="portKnockSequence"
+                  render={({ field }) => {
+                    const sequence = field.value || [];
+                    return (
+                      <div className="space-y-2">
+                        {sequence.map(
+                          (
+                            knock: {
+                              port: number;
+                              protocol?: string;
+                              delay?: number;
+                            },
+                            index: number,
+                          ) => (
+                            <div
+                              key={index}
+                              className="flex items-center gap-2"
+                            >
+                              <Input
+                                type="number"
+                                placeholder={t("hosts.port")}
+                                value={knock.port || ""}
+                                onChange={(e) => {
+                                  const updated = [...sequence];
+                                  updated[index] = {
+                                    ...updated[index],
+                                    port: parseInt(e.target.value) || 0,
+                                  };
+                                  field.onChange(updated);
+                                }}
+                                className="w-24"
+                              />
+                              <Select
+                                value={knock.protocol || "tcp"}
+                                onValueChange={(v) => {
+                                  const updated = [...sequence];
+                                  updated[index] = {
+                                    ...updated[index],
+                                    protocol: v,
+                                  };
+                                  field.onChange(updated);
+                                }}
+                              >
+                                <SelectTrigger className="w-20">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="tcp">TCP</SelectItem>
+                                  <SelectItem value="udp">UDP</SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <Input
+                                type="number"
+                                placeholder={t("hosts.delayMs")}
+                                value={knock.delay ?? 100}
+                                onChange={(e) => {
+                                  const updated = [...sequence];
+                                  updated[index] = {
+                                    ...updated[index],
+                                    delay: parseInt(e.target.value) || 0,
+                                  };
+                                  field.onChange(updated);
+                                }}
+                                className="w-20"
+                              />
+                              <span className="text-xs text-muted-foreground">
+                                ms
+                              </span>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  field.onChange(
+                                    sequence.filter(
+                                      (_: unknown, i: number) => i !== index,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          ),
+                        )}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            field.onChange([
+                              ...sequence,
+                              { port: 0, protocol: "tcp", delay: 100 },
+                            ]);
+                          }}
+                        >
+                          <Plus className="h-4 w-4 mr-1" />
+                          {t("hosts.addKnock")}
+                        </Button>
+                      </div>
+                    );
+                  }}
+                />
               </AccordionContent>
             </AccordionItem>
           </Accordion>

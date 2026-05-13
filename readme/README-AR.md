@@ -1,20 +1,7 @@
 # إحصائيات المستودع
 
 <p align="center">
-  <a href="../README.md"><img src="https://flagcdn.com/us.svg" alt="English" width="24" height="16"> English</a> ·
-  <a href="README-CN.md"><img src="https://flagcdn.com/cn.svg" alt="中文" width="24" height="16"> 中文</a> ·
-  <a href="README-JA.md"><img src="https://flagcdn.com/jp.svg" alt="日本語" width="24" height="16"> 日本語</a> ·
-  <a href="README-KO.md"><img src="https://flagcdn.com/kr.svg" alt="한국어" width="24" height="16"> 한국어</a> ·
-  <a href="README-FR.md"><img src="https://flagcdn.com/fr.svg" alt="Français" width="24" height="16"> Français</a> ·
-  <a href="README-DE.md"><img src="https://flagcdn.com/de.svg" alt="Deutsch" width="24" height="16"> Deutsch</a> ·
-  <a href="README-ES.md"><img src="https://flagcdn.com/es.svg" alt="Español" width="24" height="16"> Español</a> ·
-  <a href="README-PT.md"><img src="https://flagcdn.com/br.svg" alt="Português" width="24" height="16"> Português</a> ·
-  <a href="README-RU.md"><img src="https://flagcdn.com/ru.svg" alt="Русский" width="24" height="16"> Русский</a> ·
-  <img src="https://flagcdn.com/sa.svg" alt="العربية" width="24" height="16"> العربية ·
-  <a href="README-HI.md"><img src="https://flagcdn.com/in.svg" alt="हिन्दी" width="24" height="16"> हिन्दी</a> ·
-  <a href="README-TR.md"><img src="https://flagcdn.com/tr.svg" alt="Türkçe" width="24" height="16"> Türkçe</a> ·
-  <a href="README-VI.md"><img src="https://flagcdn.com/vn.svg" alt="Tiếng Việt" width="24" height="16"> Tiếng Việt</a> ·
-  <a href="README-IT.md"><img src="https://flagcdn.com/it.svg" alt="Italiano" width="24" height="16"> Italiano</a>
+<a href="../README.md">🇺🇸 English</a> · <a href="README-CN.md">🇨🇳 中文</a> · <a href="README-JA.md">🇯🇵 日本語</a> · <a href="README-KO.md">🇰🇷 한국어</a> · <a href="README-FR.md">🇫🇷 Français</a> · <a href="README-DE.md">🇩🇪 Deutsch</a> · <a href="README-ES.md">🇪🇸 Español</a> · <a href="README-PT.md">🇧🇷 Português</a> · <a href="README-RU.md">🇷🇺 Русский</a> · 🇸🇦 العربية · <a href="README-HI.md">🇮🇳 हिन्दी</a> · <a href="README-TR.md">🇹🇷 Türkçe</a> · <a href="README-VI.md">🇻🇳 Tiếng Việt</a> · <a href="README-IT.md">🇮🇹 Italiano</a>
 </p>
 
 ![GitHub Repo stars](https://img.shields.io/github/stars/Termix-SSH/Termix?style=flat&label=Stars)
@@ -34,9 +21,6 @@
     <img alt="Termix Banner" src=../repo-images/HeaderImage.png style="width: auto; height: auto;">  </a>
 </p>
 
-إذا كنت ترغب في ذلك، يمكنك دعم المشروع هنا!\
-[![GitHub Sponsor](https://img.shields.io/badge/Sponsor-LukeGus-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sponsors/LukeGus)
-
 # نظرة عامة
 
 <p align="center">
@@ -44,33 +28,34 @@
     <img alt="Termix Banner" src=../public/icon.svg style="width: 250px; height: 250px;">  </a>
 </p>
 
-Termix هي منصة مفتوحة المصدر ومجانية للأبد وذاتية الاستضافة لإدارة الخوادم بشكل شامل. توفر حلاً متعدد المنصات لإدارة خوادمك وبنيتك التحتية من خلال واجهة واحدة وسهلة الاستخدام. يوفر Termix الوصول إلى طرفية SSH، وقدرات إنشاء أنفاق SSH، وإدارة الملفات عن بُعد، والعديد من الأدوات الأخرى. يُعد Termix البديل المثالي المجاني وذاتي الاستضافة لـ Termius المتاح لجميع المنصات.
+Termix هي منصة مفتوحة المصدر ومجانية للأبد وذاتية الاستضافة لإدارة الخوادم بشكل شامل. توفر حلاً متعدد المنصات لإدارة خوادمك وبنيتك التحتية من خلال واجهة واحدة وسهلة الاستخدام. يوفر Termix الوصول إلى طرفية SSH، والتحكم في سطح المكتب البعيد (RDP، VNC، Telnet)، وقدرات إنشاء أنفاق SSH، وإدارة ملفات SSH عن بُعد، والعديد من الأدوات الأخرى. يُعد Termix البديل المثالي المجاني وذاتي الاستضافة لـ Termius المتاح لجميع المنصات.
 
 # الميزات
 
-- **الوصول إلى طرفية SSH** - طرفية كاملة الميزات مع دعم تقسيم الشاشة (حتى 4 لوحات) مع نظام علامات تبويب شبيه بالمتصفح. يتضمن دعم تخصيص الطرفية بما في ذلك السمات الشائعة والخطوط والمكونات الأخرى
-- **الوصول إلى سطح المكتب البعيد** - دعم RDP و VNC و Telnet عبر المتصفح مع تخصيص كامل وتقسيم الشاشة
-- **إدارة أنفاق SSH** - إنشاء وإدارة أنفاق SSH مع إعادة الاتصال التلقائي ومراقبة الحالة ودعم اتصالات -l أو -r
-- **مدير الملفات عن بُعد** - إدارة الملفات مباشرة على الخوادم البعيدة مع دعم عرض وتحرير الكود والصور والصوت والفيديو. رفع وتنزيل وإعادة تسمية وحذف ونقل الملفات بسلاسة مع دعم sudo
-- **إدارة Docker** - تشغيل وإيقاف وتعليق وحذف الحاويات. عرض إحصائيات الحاويات. التحكم في الحاوية باستخدام طرفية docker exec. لم يُصمم ليحل محل Portainer أو Dockge بل لإدارة حاوياتك ببساطة مقارنة بإنشائها
-- **مدير مضيفات SSH** - حفظ وتنظيم وإدارة اتصالات SSH الخاصة بك باستخدام العلامات والمجلدات، وحفظ بيانات تسجيل الدخول القابلة لإعادة الاستخدام بسهولة مع إمكانية أتمتة نشر مفاتيح SSH
-- **إحصائيات الخادم** - عرض استخدام المعالج والذاكرة والقرص إلى جانب الشبكة ووقت التشغيل ومعلومات النظام وجدار الحماية ومراقب المنافذ على معظم الخوادم المبنية على Linux
-- **لوحة التحكم** - عرض معلومات الخادم بنظرة واحدة على لوحة التحكم
-- **RBAC** - إنشاء الأدوار ومشاركة المضيفات عبر المستخدمين/الأدوار
-- **مصادقة المستخدمين** - إدارة آمنة للمستخدمين مع ضوابط إدارية ودعم OIDC و 2FA (TOTP). عرض جلسات المستخدمين النشطة عبر جميع المنصات وإلغاء الصلاحيات. ربط حسابات OIDC/المحلية معاً
-- **تشفير قاعدة البيانات** - يُخزَّن الخادم الخلفي كملفات قاعدة بيانات SQLite مشفرة. اطلع على [الوثائق](https://docs.termix.site/security) لمزيد من المعلومات
-- **تصدير/استيراد البيانات** - تصدير واستيراد مضيفات SSH وبيانات الاعتماد وبيانات مدير الملفات
-- **إعداد SSL تلقائي** - إنشاء وإدارة شهادات SSL مدمجة مع إعادة التوجيه إلى HTTPS
-- **واجهة مستخدم حديثة** - واجهة نظيفة متوافقة مع سطح المكتب والهاتف المحمول مبنية بـ React و Tailwind CSS و Shadcn. الاختيار بين الوضع الداكن أو الفاتح. استخدام مسارات URL لفتح أي اتصال في وضع ملء الشاشة
-- **اللغات** - دعم مدمج لحوالي 30 لغة (تُدار بواسطة [Crowdin](https://docs.termix.site/translations))
-- **دعم المنصات** - متاح كتطبيق ويب، وتطبيق سطح مكتب (Windows و Linux و macOS)، و PWA، وتطبيق مخصص للهاتف المحمول/الجهاز اللوحي لـ iOS و Android
-- **أدوات SSH** - إنشاء مقتطفات أوامر قابلة لإعادة الاستخدام تُنفَّذ بنقرة واحدة. تشغيل أمر واحد في وقت واحد عبر عدة طرفيات مفتوحة
-- **سجل الأوامر** - الإكمال التلقائي وعرض أوامر SSH التي تم تنفيذها سابقاً
-- **الاتصال السريع** - الاتصال بخادم دون الحاجة إلى حفظ بيانات الاتصال
-- **لوحة الأوامر** - اضغط مرتين على Shift الأيسر للوصول السريع إلى اتصالات SSH باستخدام لوحة المفاتيح
-- **ميزات SSH الغنية** - دعم مضيفات القفز، Warpgate، الاتصالات المبنية على TOTP، SOCKS5، التحقق من مفتاح المضيف، الملء التلقائي لكلمة المرور، [OPKSSH](https://github.com/openpubkey/opkssh)، وغيرها
-- **الرسم البياني للشبكة** - تخصيص لوحة التحكم لتصور مختبرك المنزلي بناءً على اتصالات SSH مع دعم الحالة
-- **علامات التبويب الدائمة** - تبقى جلسات SSH وعلامات التبويب مفتوحة عبر الأجهزة/التحديثات إذا تم تفعيلها في ملف تعريف المستخدم
+- **الوصول إلى طرفية SSH** - طرفية كاملة الميزات مع دعم تقسيم الشاشة (حتى 4 لوحات) مع نظام علامات تبويب شبيه بالمتصفح. يتضمن دعم تخصيص الطرفية بما في ذلك سمات الطرفية الشائعة والخطوط والمكونات الأخرى.
+- **الوصول إلى سطح المكتب البعيد** - دعم RDP و VNC و Telnet عبر المتصفح مع تخصيص كامل وتقسيم الشاشة.
+- **إدارة أنفاق SSH** - إنشاء وإدارة أنفاق SSH بين الخوادم مع إعادة الاتصال التلقائي ومراقبة الحالة وإعادة التوجيه المحلي أو البعيد أو SOCKS الديناميكي. يتم تخزين إعدادات نفق العميل-المكتبي إلى السيرفر محلياً لكل تثبيت مكتبي؛ يمكن حفظ لقطات C2S الاختيارية على الخادم وإعادة تسميتها وتحميلها أو حذفها لنقل تكوين النفق المحلي بين العملاء.
+- **مدير الملفات عن بُعد** - إدارة الملفات مباشرة على الخوادم البعيدة مع دعم عرض وتحرير الكود والصور والصوت والفيديو. رفع وتنزيل وإعادة تسمية وحذف ونقل الملفات بسلاسة مع دعم sudo.
+- **إدارة Docker** - تشغيل وإيقاف وتعليق وحذف الحاويات. عرض إحصائيات الحاويات. التحكم في الحاوية باستخدام طرفية docker exec. لم يُصمم ليحل محل Portainer أو Dockge بل لإدارة حاوياتك ببساطة مقارنة بإنشائها.
+- **مدير مضيفات SSH** - حفظ وتنظيم وإدارة اتصالات SSH الخاصة بك باستخدام العلامات والمجلدات، وحفظ بيانات تسجيل الدخول القابلة لإعادة الاستخدام بسهولة مع إمكانية أتمتة نشر مفاتيح SSH.
+- **إحصائيات الخادم** - عرض استخدام المعالج والذاكرة والقرص إلى جانب الشبكة ووقت التشغيل ومعلومات النظام وجدار الحماية ومراقب المنافذ على معظم الخوادم المبنية على Linux.
+- **لوحة التحكم** - عرض معلومات الخادم بنظرة واحدة على لوحة التحكم.
+- **RBAC** - إنشاء الأدوار ومشاركة المضيفات عبر المستخدمين/الأدوار.
+- **مصادقة المستخدمين** - إدارة آمنة للمستخدمين مع ضوابط إدارية ودعم OIDC (مع التحكم في الوصول) و 2FA (TOTP). عرض جلسات المستخدمين النشطة عبر جميع المنصات وإلغاء الصلاحيات. ربط حسابات OIDC/المحلية معاً.
+- **تشفير قاعدة البيانات** - يُخزَّن الخادم الخلفي كملفات قاعدة بيانات SQLite مشفرة. اطلع على [الوثائق](https://docs.termix.site/security) لمزيد من المعلومات.
+- **مفاتيح API** - إنشاء مفاتيح API محددة النطاق للمستخدم مع تواريخ انتهاء صلاحية للاستخدام في الأتمتة/CI.
+- **تصدير/استيراد البيانات** - تصدير واستيراد مضيفات SSH وبيانات الاعتماد وبيانات مدير الملفات.
+- **إعداد SSL تلقائي** - إنشاء وإدارة شهادات SSL مدمجة مع إعادة التوجيه إلى HTTPS.
+- **واجهة مستخدم حديثة** - واجهة نظيفة متوافقة مع سطح المكتب والهاتف المحمول مبنية بـ React و Tailwind CSS و Shadcn. الاختيار بين العديد من سمات واجهة المستخدم بما في ذلك الفاتح والداكن و Dracula وغيرها. استخدام مسارات URL لفتح أي اتصال في وضع ملء الشاشة.
+- **اللغات** - دعم مدمج لحوالي 30 لغة (تُدار بواسطة [Crowdin](https://docs.termix.site/translations)).
+- **دعم المنصات** - متاح كتطبيق ويب، وتطبيق سطح مكتب (Windows و Linux و macOS، يمكن تشغيله بشكل مستقل بدون خادم Termix الخلفي)، و PWA، وتطبيق مخصص للهاتف المحمول/الجهاز اللوحي لـ iOS و Android.
+- **أدوات SSH** - إنشاء مقتطفات أوامر قابلة لإعادة الاستخدام تُنفَّذ بنقرة واحدة. تشغيل أمر واحد في وقت واحد عبر عدة طرفيات مفتوحة.
+- **سجل الأوامر** - الإكمال التلقائي وعرض أوامر SSH التي تم تنفيذها سابقاً.
+- **الاتصال السريع** - الاتصال بخادم دون الحاجة إلى حفظ بيانات الاتصال.
+- **لوحة الأوامر** - اضغط مرتين على Shift الأيسر للوصول السريع إلى اتصالات SSH باستخدام لوحة المفاتيح.
+- **ميزات SSH الغنية** - دعم مضيفات القفز، Warpgate، الاتصالات المبنية على TOTP، SOCKS5، التحقق من مفتاح المضيف، الملء التلقائي لكلمة المرور، [OPKSSH](https://github.com/openpubkey/opkssh)، tmux، port knocking، إلخ.
+- **الرسم البياني للشبكة** - تخصيص لوحة التحكم لتصور مختبرك المنزلي بناءً على اتصالات SSH مع دعم الحالة.
+- **علامات التبويب الدائمة** - تبقى جلسات SSH وعلامات التبويب مفتوحة عبر الأجهزة/التحديثات إذا تم تفعيلها في ملف تعريف المستخدم.
 
 # الميزات المخططة
 
@@ -102,7 +87,7 @@ Termix هي منصة مفتوحة المصدر ومجانية للأبد وذا�
   - Google Play Store
   - APK
 
-قم بزيارة [وثائق](https://docs.termix.site/install) Termix للحصول على مزيد من المعلومات حول كيفية تثبيت Termix على جميع المنصات. بخلاف ذلك، يمكنك الاطلاع على نموذج ملف Docker Compose هنا:
+قم بزيارة [وثائق](https://docs.termix.site/install) Termix للحصول على مزيد من المعلومات حول كيفية تثبيت Termix على جميع المنصات. بخلاف ذلك، يمكنك الاطلاع على نموذج ملف Docker Compose هنا (يمكنك حذف guacd والشبكة إذا كنت لا تخطط لاستخدام ميزات سطح المكتب البعيد):
 
 ```yaml
 services:
@@ -122,7 +107,7 @@ services:
       - termix-net
 
   guacd:
-    image: guacamole/guacd:latest
+    image: guacamole/guacd:1.6.0
     container_name: guacd
     restart: unless-stopped
     ports:
@@ -151,11 +136,23 @@ networks:
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://www.blacksmith.sh/">
-    <img src="https://cdn.prod.website-files.com/681bfb0c9a4601bc6e288ec4/683ca9e2c5186757092611b8_e8cb22127df4da0811c4120a523722d2_logo-backsmith-wordmark-light.svg" height="50" alt="Crowdin">
+    <img src="https://cdn.prod.website-files.com/681bfb0c9a4601bc6e288ec4/683ca9e2c5186757092611b8_e8cb22127df4da0811c4120a523722d2_logo-backsmith-wordmark-light.svg" height="50" alt="Blacksmith">
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://www.cloudflare.com/">
-    <img src="https://sirv.sirv.com/website/screenshots/cloudflare/cloudflare-logo.png?w=300" height="50" alt="Crowdin">
+    <img src="https://sirv.sirv.com/website/screenshots/cloudflare/cloudflare-logo.png?w=300" height="50" alt="Cloudflare">
+  </a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://tailscale.com/">
+    <img src="https://drive.google.com/uc?export=view&id=1lIxkJuX6M23bW-2FElhT0rQieTrzaVSL" height="50" alt="TailScale">
+  </a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://akamai.com/">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/8/8b/Akamai_logo.svg" height="50" alt="Akamai">
+  </a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://aws.amazon.com/">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/Amazon_Web_Services_Logo.svg/960px-Amazon_Web_Services_Logo.svg.png" height="50" alt="AWS">
   </a>
 </p>
 

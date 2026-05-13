@@ -40,16 +40,15 @@ import { cn } from "@/lib/utils.ts";
 import {
   TERMINAL_THEMES,
   TERMINAL_FONTS,
-  CURSOR_STYLES,
-  BELL_STYLES,
-  FAST_SCROLL_MODIFIERS,
 } from "@/constants/terminal-themes.ts";
 import { TerminalPreview } from "@/ui/desktop/apps/features/terminal/TerminalPreview.tsx";
 import type { HostTerminalTabProps } from "./shared/tab-types";
 import React from "react";
+import { useTabs } from "@/ui/desktop/navigation/tabs/TabContext.tsx";
 
 export function HostTerminalTab({ form, snippets, t }: HostTerminalTabProps) {
   const [snippetPopoverOpen, setSnippetPopoverOpen] = React.useState(false);
+  const { setPreviewTerminalTheme } = useTabs();
   return (
     <div className="space-y-1">
       <FormField
@@ -103,9 +102,15 @@ export function HostTerminalTab({ form, snippets, t }: HostTerminalTabProps) {
                         <SelectValue placeholder={t("hosts.selectTheme")} />
                       </SelectTrigger>
                     </FormControl>
-                    <SelectContent>
+                    <SelectContent
+                      onMouseLeave={() => setPreviewTerminalTheme(null)}
+                    >
                       {Object.entries(TERMINAL_THEMES).map(([key, theme]) => (
-                        <SelectItem key={key} value={key}>
+                        <SelectItem
+                          key={key}
+                          value={key}
+                          onMouseEnter={() => setPreviewTerminalTheme(key)}
+                        >
                           {theme.name}
                         </SelectItem>
                       ))}
@@ -636,6 +641,25 @@ export function HostTerminalTab({ form, snippets, t }: HostTerminalTabProps) {
                 )}
               />
             )}
+
+            <FormField
+              control={form.control}
+              name="terminalConfig.autoTmux"
+              render={({ field }) => (
+                <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 bg-elevated dark:bg-input/30">
+                  <div className="space-y-0.5">
+                    <FormLabel>{t("hosts.autoTmux")}</FormLabel>
+                    <FormDescription>{t("hosts.autoTmuxDesc")}</FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
 
             <FormField
               control={form.control}

@@ -1,21 +1,23 @@
-import React, { useEffect, useState, useContext } from "react";
+import React, { useEffect, useState } from "react";
 import { Auth } from "@/ui/desktop/authentication/Auth.tsx";
 import { AlertManager } from "@/ui/desktop/apps/dashboard/apps/alerts/AlertManager.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import {
   getUserInfo,
   getDatabaseHealth,
-  getCookie,
   getUptime,
   getVersionInfo,
   getSSHHosts,
   getCredentials,
   getRecentActivity,
   resetRecentActivity,
+  getAllServerStatuses,
   getServerMetricsById,
   registerMetricsViewer,
   sendMetricsHeartbeat,
-  getGuacamoleToken,
+  getGuacamoleDpi,
+  getGuacamoleTokenFromHost,
+  isCurrentAuthInvalidationError,
   type RecentActivityItem,
 } from "@/ui/main-axios.ts";
 import { useSidebar } from "@/components/ui/sidebar.tsx";
@@ -62,13 +64,13 @@ export function Dashboard({
   const [isAdmin, setIsAdmin] = useState(false);
   const [, setUsername] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [dbError, setDbError] = useState<string | null>(initialDbError);
+  const [, setDbError] = useState<string | null>(initialDbError);
 
   const [uptime, setUptime] = useState<string>("0d 0h 0m");
   const [versionStatus, setVersionStatus] = useState<
-    "up_to_date" | "requires_update"
+    "up_to_date" | "requires_update" | "beta"
   >("up_to_date");
-  const [versionText, setVersionText] = useState<string>("v1.8.0");
+  const [versionText, setVersionText] = useState<string>("");
   const [dbHealth, setDbHealth] = useState<"healthy" | "error">("healthy");
   const [totalServers, setTotalServers] = useState<number>(0);
   const [totalTunnels, setTotalTunnels] = useState<number>(0);
@@ -91,7 +93,7 @@ export function Dashboard({
   );
   const [initialLoading, setInitialLoading] = useState(true);
 
-  const { addTab, setCurrentTab, tabs: tabList, updateTab } = useTabs();
+  const { addTab, setCurrentTab, tabs: tabList } = useTabs();
   const {
     layout,
     loading: preferencesLoading,
@@ -100,12 +102,12 @@ export function Dashboard({
   } = useDashboardPreferences(loggedIn);
 
   let sidebarState: "expanded" | "collapsed" = "expanded";
-  let sidebarAvailable = false;
   try {
     const sidebar = useSidebar();
     sidebarState = sidebar.state;
-    sidebarAvailable = true;
-  } catch {}
+  } catch {
+    // Sidebar context is not available on every dashboard mount path.
+  }
 
   const topMarginPx = isTopbarOpen ? 74 : 26;
   const leftMarginPx = sidebarState === "collapsed" ? 26 : 8;
@@ -118,40 +120,36 @@ export function Dashboard({
 
   useEffect(() => {
     if (isAuthenticated) {
-      if (getCookie("jwt")) {
-        getUserInfo()
-          .then((meRes) => {
-            setIsAdmin(!!meRes.is_admin);
-            setUsername(meRes.username || null);
-            setUserId(meRes.userId || null);
-            setDbError(null);
-          })
-          .catch((err) => {
+      getUserInfo()
+        .then((meRes) => {
+          setIsAdmin(!!meRes.is_admin);
+          setUsername(meRes.username || null);
+          setUserId(meRes.userId || null);
+          setDbError(null);
+        })
+        .catch((err) => {
+          if (isCurrentAuthInvalidationError(err)) {
             setIsAdmin(false);
             setUsername(null);
             setUserId(null);
-
-            const errorCode = err?.response?.data?.code;
-            if (errorCode === "SESSION_EXPIRED") {
-              console.warn("Session expired - please log in again");
-              setDbError("Session expired - please log in again");
-            } else {
-              setDbError(null);
-            }
-          });
-
-        getDatabaseHealth()
-          .then(() => {
+            console.warn("Session expired - please log in again");
+            setDbError("Session expired - please log in again");
+          } else {
             setDbError(null);
-          })
-          .catch((err) => {
-            if (err?.response?.data?.error?.includes("Database")) {
-              setDbError(
-                "Could not connect to the database. Please try again later.",
-              );
-            }
-          });
-      }
+          }
+        });
+
+      getDatabaseHealth()
+        .then(() => {
+          setDbError(null);
+        })
+        .catch((err) => {
+          if (err?.response?.data?.error?.includes("Database")) {
+            setDbError(
+              "Could not connect to the database. Please try again later.",
+            );
+          }
+        });
     }
   }, [isAuthenticated]);
 
@@ -171,7 +169,8 @@ export function Dashboard({
           setVersionText(`v${versionInfo.localVersion}`);
           if (
             versionInfo.status === "up_to_date" ||
-            versionInfo.status === "requires_update"
+            versionInfo.status === "requires_update" ||
+            versionInfo.status === "beta"
           ) {
             setVersionStatus(versionInfo.status);
           }
@@ -223,72 +222,108 @@ export function Dashboard({
         setRecentActivityLoading(false);
 
         setServerStatsLoading(true);
+
+        // Fetch current host statuses once so we can skip offline hosts
+        // before issuing per-host register-viewer / metrics requests.
+        let hostStatuses: Record<number, { status?: string }> = {};
+        try {
+          hostStatuses = (await getAllServerStatuses()) as Record<
+            number,
+            { status?: string }
+          >;
+        } catch {
+          // Best-effort: if the status endpoint is unavailable, fall back
+          // to the previous behavior and still attempt each host.
+          hostStatuses = {};
+        }
+
         const newViewerSessions = new Map<number, string>();
         const serversWithStats = await Promise.all(
-          hosts
-            .slice(0, 50)
-            .map(
-              async (host: {
-                id: number;
-                name: string;
-                authType?: string;
-                statsConfig?: string | { metricsEnabled?: boolean };
-              }) => {
-                try {
-                  let statsConfig: { metricsEnabled?: boolean } = {
-                    metricsEnabled: true,
+          hosts.slice(0, 50).map(
+            async (host: {
+              id: number;
+              name: string;
+              authType?: string;
+              statsConfig?:
+                | string
+                | {
+                    metricsEnabled?: boolean;
+                    statusCheckEnabled?: boolean;
                   };
-                  if (host.statsConfig) {
-                    if (typeof host.statsConfig === "string") {
-                      statsConfig = JSON.parse(host.statsConfig);
-                    } else {
-                      statsConfig = host.statsConfig;
-                    }
-                  }
-
-                  if (statsConfig.metricsEnabled === false) {
-                    return null;
-                  }
-
-                  if (host.authType === "none") {
-                    return null;
-                  }
-
-                  if (host.authType === "opkssh") {
-                    return null;
-                  }
-
-                  const existingSession = viewerSessions.get(host.id);
-                  let sessionId = existingSession;
-
-                  if (!existingSession) {
-                    try {
-                      const viewerResult = await registerMetricsViewer(host.id);
-                      if (
-                        viewerResult.success &&
-                        viewerResult.viewerSessionId
-                      ) {
-                        sessionId = viewerResult.viewerSessionId;
-                        newViewerSessions.set(host.id, sessionId);
-                      }
-                    } catch (error) {
-                      console.error(
-                        `Failed to register viewer for host ${host.id}:`,
-                        error,
-                      );
-                    }
+            }) => {
+              try {
+                let statsConfig: {
+                  metricsEnabled?: boolean;
+                  statusCheckEnabled?: boolean;
+                } = {
+                  metricsEnabled: true,
+                  statusCheckEnabled: true,
+                };
+                if (host.statsConfig) {
+                  if (typeof host.statsConfig === "string") {
+                    statsConfig = JSON.parse(host.statsConfig);
                   } else {
-                    newViewerSessions.set(host.id, existingSession);
+                    statsConfig = host.statsConfig;
                   }
+                }
 
-                  const metrics = await getServerMetricsById(host.id);
-                  return {
-                    id: host.id,
-                    name: host.name || `Host ${host.id}`,
-                    cpu: metrics.cpu.percent,
-                    ram: metrics.memory.percent,
-                  };
-                } catch {
+                if (statsConfig.metricsEnabled === false) {
+                  return null;
+                }
+
+                if (host.authType === "none") {
+                  return null;
+                }
+
+                if (host.authType === "opkssh") {
+                  return null;
+                }
+
+                // Skip hosts that are known to be offline: no metrics can
+                // possibly exist for them, and hitting /metrics/:id would
+                // just 404. If the status is unknown (e.g. no entry yet
+                // or statusCheckEnabled === false) we still attempt.
+                if (statsConfig.statusCheckEnabled !== false) {
+                  const knownStatus = hostStatuses?.[host.id]?.status;
+                  if (knownStatus === "offline") {
+                    return null;
+                  }
+                }
+
+                const existingSession = viewerSessions.get(host.id);
+                let sessionId = existingSession;
+                let registrationSkipped = false;
+
+                if (!existingSession) {
+                  try {
+                    const viewerResult = await registerMetricsViewer(host.id);
+                    if (viewerResult.skipped) {
+                      // Metrics disabled/unsupported on this host; don't
+                      // poll and don't surface this as an error.
+                      registrationSkipped = true;
+                    } else if (
+                      viewerResult.success &&
+                      viewerResult.viewerSessionId
+                    ) {
+                      sessionId = viewerResult.viewerSessionId;
+                      newViewerSessions.set(host.id, sessionId);
+                    }
+                  } catch (error) {
+                    console.error(
+                      `Failed to register viewer for host ${host.id}:`,
+                      error,
+                    );
+                  }
+                } else {
+                  newViewerSessions.set(host.id, existingSession);
+                }
+
+                if (registrationSkipped) {
+                  return null;
+                }
+
+                const metrics = await getServerMetricsById(host.id);
+                if (!metrics) {
                   return {
                     id: host.id,
                     name: host.name || `Host ${host.id}`,
@@ -296,8 +331,22 @@ export function Dashboard({
                     ram: null,
                   };
                 }
-              },
-            ),
+                return {
+                  id: host.id,
+                  name: host.name || `Host ${host.id}`,
+                  cpu: metrics.cpu?.percent ?? null,
+                  ram: metrics.memory?.percent ?? null,
+                };
+              } catch {
+                return {
+                  id: host.id,
+                  name: host.name || `Host ${host.id}`,
+                  cpu: null,
+                  ram: null,
+                };
+              }
+            },
+          ),
         );
         setViewerSessions(newViewerSessions);
         const validServerStats = serversWithStats.filter(
@@ -388,17 +437,7 @@ export function Dashboard({
           hostConfig: host,
         });
       } else if (item.type === "telnet") {
-        getGuacamoleToken({
-          protocol: "telnet",
-          hostname: host.ip,
-          port: host.port,
-          username: host.username,
-          password: host.password,
-          domain: host.domain,
-          security: host.security,
-          ignoreCert: host.ignoreCert,
-          guacamoleConfig: host.guacamoleConfig as any,
-        })
+        getGuacamoleTokenFromHost(host.id)
           .then((result) => {
             addTab({
               type: "telnet",
@@ -415,6 +454,7 @@ export function Dashboard({
                 domain: host.domain,
                 security: host.security,
                 "ignore-cert": host.ignoreCert,
+                dpi: getGuacamoleDpi(host),
               },
             });
           })
@@ -422,17 +462,7 @@ export function Dashboard({
             console.error("Failed to get telnet token:", error);
           });
       } else if (item.type === "vnc") {
-        getGuacamoleToken({
-          protocol: "vnc",
-          hostname: host.ip,
-          port: host.port,
-          username: host.username,
-          password: host.password,
-          domain: host.domain,
-          security: host.security,
-          ignoreCert: host.ignoreCert,
-          guacamoleConfig: host.guacamoleConfig as any,
-        })
+        getGuacamoleTokenFromHost(host.id)
           .then((result) => {
             addTab({
               type: "vnc",
@@ -449,6 +479,7 @@ export function Dashboard({
                 domain: host.domain,
                 security: host.security,
                 "ignore-cert": host.ignoreCert,
+                dpi: getGuacamoleDpi(host),
               },
             });
           })
@@ -456,17 +487,7 @@ export function Dashboard({
             console.error("Failed to get vnc token:", error);
           });
       } else if (item.type === "rdp") {
-        getGuacamoleToken({
-          protocol: "rdp",
-          hostname: host.ip,
-          port: host.port,
-          username: host.username,
-          password: host.password,
-          domain: host.domain,
-          security: host.security,
-          ignoreCert: host.ignoreCert,
-          guacamoleConfig: host.guacamoleConfig as any,
-        })
+        getGuacamoleTokenFromHost(host.id)
           .then((result) => {
             addTab({
               type: "rdp",
@@ -483,6 +504,7 @@ export function Dashboard({
                 domain: host.domain,
                 security: host.security,
                 "ignore-cert": host.ignoreCert,
+                dpi: getGuacamoleDpi(host),
               },
             });
           })
@@ -577,7 +599,6 @@ export function Dashboard({
             setUserId={setUserId}
             loggedIn={loggedIn}
             authLoading={authLoading}
-            dbError={dbError}
             setDbError={setDbError}
             onAuthSuccess={onAuthSuccess}
           />
@@ -611,7 +632,7 @@ export function Dashboard({
               <div className="flex flex-row gap-3 flex-wrap min-w-0">
                 <div className="flex flex-col items-center gap-4 justify-center mr-5 min-w-0 shrink">
                   <p className="text-muted-foreground text-sm whitespace-nowrap">
-                    Press <Kbd>LShift</Kbd> twice to open the command palette
+                    Press <Kbd>L Shift</Kbd> twice to open the command palette
                   </p>
                 </div>
                 <Button
@@ -649,15 +670,6 @@ export function Dashboard({
                   }
                 >
                   {t("dashboard.discord")}
-                </Button>
-                <Button
-                  className="font-semibold shrink-0 !bg-canvas"
-                  variant="outline"
-                  onClick={() =>
-                    window.open("https://github.com/sponsors/LukeGus", "_blank")
-                  }
-                >
-                  {t("dashboard.donate")}
                 </Button>
                 <Button
                   className="font-semibold shrink-0 !bg-canvas"

@@ -7,7 +7,6 @@ import {
   CardTitle,
 } from "@/components/ui/card.tsx";
 import { Button } from "@/components/ui/button.tsx";
-import { Input } from "@/components/ui/input.tsx";
 import { PasswordInput } from "@/components/ui/password-input.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert.tsx";
@@ -96,7 +95,7 @@ export function SSHAuthDialog({
       } = {};
 
       if (authTab === "password") {
-        if (password.trim()) {
+        if (password !== "") {
           credentials.password = password;
         }
       } else {
@@ -130,7 +129,7 @@ export function SSHAuthDialog({
 
   const canSubmit = () => {
     if (authTab === "password") {
-      return password.trim() !== "";
+      return password !== "";
     } else {
       return sshKey.trim() !== "";
     }

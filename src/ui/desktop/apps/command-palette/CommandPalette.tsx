@@ -8,13 +8,12 @@ import {
 } from "@/components/ui/command.tsx";
 import React, { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { Kbd, KbdGroup } from "@/components/ui/kbd";
+import { Kbd, KbdKey, KbdSeparator } from "@/components/ui/kbd";
 import {
   Key,
   Server,
   Settings,
   User,
-  Github,
   Terminal,
   Monitor,
   Eye,
@@ -28,16 +27,17 @@ import {
 import { useTranslation } from "react-i18next";
 import { BiMoney, BiSupport } from "react-icons/bi";
 import { BsDiscord } from "react-icons/bs";
+import { FaGithub } from "react-icons/fa";
 import { GrUpdate } from "react-icons/gr";
 import { useTabs } from "@/ui/desktop/navigation/tabs/TabContext.tsx";
 import {
   getRecentActivity,
   getSSHHosts,
-  getGuacamoleToken,
+  getGuacamoleDpi,
+  getGuacamoleTokenFromHost,
   logActivity,
 } from "@/ui/main-axios.ts";
 import type { RecentActivityItem } from "@/ui/main-axios.ts";
-import { toast } from "sonner";
 import { DEFAULT_STATS_CONFIG } from "@/types/stats-widgets";
 import {
   DropdownMenu,
@@ -75,12 +75,34 @@ interface SSHHost {
   domain?: string;
   security?: string;
   ignoreCert?: boolean;
-  guacamoleConfig?: any;
+  guacamoleConfig?: unknown;
   showTerminalInSidebar?: boolean;
   showFileManagerInSidebar?: boolean;
   showTunnelInSidebar?: boolean;
   showDockerInSidebar?: boolean;
   showServerStatsInSidebar?: boolean;
+}
+
+function shouldShowMetrics(host: SSHHost): boolean {
+  try {
+    const statsConfig = host.statsConfig
+      ? JSON.parse(host.statsConfig)
+      : DEFAULT_STATS_CONFIG;
+    return statsConfig.metricsEnabled !== false;
+  } catch {
+    return true;
+  }
+}
+
+function hasTunnelConnections(host: SSHHost): boolean {
+  try {
+    const tunnelConnections = Array.isArray(host.tunnelConnections)
+      ? host.tunnelConnections
+      : JSON.parse(host.tunnelConnections as string);
+    return Array.isArray(tunnelConnections) && tunnelConnections.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 export function CommandPalette({
@@ -235,17 +257,7 @@ export function CommandPalette({
     ) {
       try {
         const protocol = host.connectionType as "rdp" | "vnc" | "telnet";
-        const result = await getGuacamoleToken({
-          protocol,
-          hostname: host.ip,
-          port: host.port,
-          username: host.username,
-          password: host.password,
-          domain: host.domain,
-          security: host.security,
-          ignoreCert: host.ignoreCert,
-          guacamoleConfig: host.guacamoleConfig as any,
-        });
+        const result = await getGuacamoleTokenFromHost(host.id);
 
         addTab({
           type: protocol,
@@ -262,6 +274,7 @@ export function CommandPalette({
             domain: host.domain,
             security: host.security,
             "ignore-cert": host.ignoreCert,
+            dpi: getGuacamoleDpi(host),
           },
         });
 
@@ -314,9 +327,6 @@ export function CommandPalette({
   };
 
   const handleHostEditClick = (host: SSHHost) => {
-    const title = host.name?.trim()
-      ? host.name
-      : `${host.username}@${host.ip}:${host.port}`;
     addTab({
       type: "ssh_manager",
       title: t("commandPalette.hostManager"),
@@ -399,32 +409,10 @@ export function CommandPalette({
                     ? host.name
                     : `${host.username}@${host.ip}:${host.port}`;
 
-                  let shouldShowMetrics = true;
-                  try {
-                    const statsConfig = host.statsConfig
-                      ? JSON.parse(host.statsConfig)
-                      : DEFAULT_STATS_CONFIG;
-                    shouldShowMetrics = statsConfig.metricsEnabled !== false;
-                  } catch {
-                    shouldShowMetrics = true;
-                  }
-
                   const isSSH =
                     !host.connectionType || host.connectionType === "ssh";
-
-                  let hasTunnelConnections = false;
-                  try {
-                    const tunnelConnections = Array.isArray(
-                      host.tunnelConnections,
-                    )
-                      ? host.tunnelConnections
-                      : JSON.parse(host.tunnelConnections as string);
-                    hasTunnelConnections =
-                      Array.isArray(tunnelConnections) &&
-                      tunnelConnections.length > 0;
-                  } catch {
-                    hasTunnelConnections = false;
-                  }
+                  const showMetrics = shouldShowMetrics(host);
+                  const hasTunnels = hasTunnelConnections(host);
 
                   const visibleButtons = [
                     host.enableTerminal && (host.showTerminalInSidebar ?? true),
@@ -433,13 +421,13 @@ export function CommandPalette({
                       (host.showFileManagerInSidebar ?? false),
                     isSSH &&
                       host.enableTunnel &&
-                      hasTunnelConnections &&
+                      hasTunnels &&
                       (host.showTunnelInSidebar ?? false),
                     isSSH &&
                       host.enableDocker &&
                       (host.showDockerInSidebar ?? false),
                     isSSH &&
-                      shouldShowMetrics &&
+                      showMetrics &&
                       (host.showServerStatsInSidebar ?? false),
                   ].filter(Boolean).length;
 
@@ -501,7 +489,7 @@ export function CommandPalette({
 
                         {isSSH &&
                           host.enableTunnel &&
-                          hasTunnelConnections &&
+                          hasTunnels &&
                           (host.showTunnelInSidebar ?? false) && (
                             <Button
                               variant="outline"
@@ -531,7 +519,7 @@ export function CommandPalette({
                           )}
 
                         {isSSH &&
-                          shouldShowMetrics &&
+                          showMetrics &&
                           (host.showServerStatsInSidebar ?? false) && (
                             <Button
                               variant="outline"
@@ -588,7 +576,7 @@ export function CommandPalette({
                                 </DropdownMenuItem>
                               )}
                             {isSSH &&
-                              shouldShowMetrics &&
+                              showMetrics &&
                               !(host.showServerStatsInSidebar ?? false) && (
                                 <DropdownMenuItem
                                   onClick={(e) => {
@@ -621,7 +609,7 @@ export function CommandPalette({
                               )}
                             {isSSH &&
                               host.enableTunnel &&
-                              hasTunnelConnections &&
+                              hasTunnels &&
                               !(host.showTunnelInSidebar ?? false) && (
                                 <DropdownMenuItem
                                   onClick={(e) => {
@@ -674,7 +662,7 @@ export function CommandPalette({
           )}
           <CommandGroup heading={t("commandPalette.links")}>
             <CommandItem onSelect={handleGitHub}>
-              <Github />
+              <FaGithub />
               <span>{t("commandPalette.github")}</span>
             </CommandItem>
             <CommandItem onSelect={handleSupport}>
@@ -694,10 +682,11 @@ export function CommandPalette({
         <div className="border-t border-edge px-4 py-2 bg-hover/50 flex items-center justify-between text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
             <span>{t("commandPalette.press")}</span>
-            <KbdGroup>
-              <Kbd>Shift</Kbd>
-              <Kbd>Shift</Kbd>
-            </KbdGroup>
+            <Kbd>
+              <KbdKey>Shift</KbdKey>
+              <KbdSeparator />
+              <KbdKey>Shift</KbdKey>
+            </Kbd>
             <span>{t("commandPalette.toToggle")}</span>
           </div>
           <div className="flex items-center gap-2">

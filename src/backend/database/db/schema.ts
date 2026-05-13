@@ -141,6 +141,9 @@ export const hosts = sqliteTable("ssh_data", {
   socks5Password: text("socks5_password"),
   socks5ProxyChain: text("socks5_proxy_chain"),
 
+  macAddress: text("mac_address"),
+  portKnockSequence: text("port_knock_sequence"),
+
   hostKeyFingerprint: text("host_key_fingerprint"),
   hostKeyType: text("host_key_type"),
   hostKeyAlgorithm: text("host_key_algorithm").default("sha256"),
@@ -291,6 +294,47 @@ export const snippetFolders = sqliteTable("snippet_folders", {
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const c2sTunnelPresets = sqliteTable("c2s_tunnel_presets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  config: text("config").notNull(),
+  platform: text("platform"),
+  computerName: text("computer_name"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const snippetAccess = sqliteTable("snippet_access", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  snippetId: integer("snippet_id")
+    .notNull()
+    .references(() => snippets.id, { onDelete: "cascade" }),
+
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  roleId: integer("role_id").references(() => roles.id, {
+    onDelete: "cascade",
+  }),
+
+  grantedBy: text("granted_by")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+
+  permissionLevel: text("permission_level").notNull().default("view"),
+
+  expiresAt: text("expires_at"),
+
+  createdAt: text("created_at")
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
 });
@@ -544,4 +588,18 @@ export const opksshTokens = sqliteTable("opkssh_tokens", {
     .default(sql`CURRENT_TIMESTAMP`),
   expiresAt: text("expires_at").notNull(),
   lastUsed: text("last_used"),
+});
+
+export const apiKeys = sqliteTable("api_keys", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  tokenPrefix: text("token_prefix").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  expiresAt: text("expires_at"),
+  lastUsedAt: text("last_used_at"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
 });

@@ -22,32 +22,39 @@ import {
   completePasswordReset,
   getOIDCAuthorizeUrl,
   verifyTOTPLogin,
-  logoutUser,
-  isElectron,
   getCookie,
+  getCurrentToken,
 } from "@/ui/main-axios.ts";
 import { PasswordInput } from "@/components/ui/password-input.tsx";
 
+type ReactNativeWindow = Window & {
+  ReactNativeWebView?: {
+    postMessage: (message: string) => void;
+  };
+};
+
 function isReactNativeWebView(): boolean {
-  return typeof window !== "undefined" && !!(window as any).ReactNativeWebView;
+  return (
+    typeof window !== "undefined" &&
+    !!(window as ReactNativeWindow).ReactNativeWebView
+  );
 }
 
-function postJWTToWebView() {
+async function postAuthSuccessToWebView() {
   if (!isReactNativeWebView()) {
     return;
   }
 
   try {
-    const jwt = getCookie("jwt") || localStorage.getItem("jwt");
-
-    if (!jwt) {
-      return;
+    // HTTP-only cookies can't be read via JS — fetch token from the API
+    let token = getCookie("jwt") || localStorage.getItem("jwt");
+    if (!token) {
+      token = await getCurrentToken();
     }
-
-    (window as any).ReactNativeWebView.postMessage(
+    (window as ReactNativeWindow).ReactNativeWebView?.postMessage(
       JSON.stringify({
         type: "AUTH_SUCCESS",
-        token: jwt,
+        token,
         source: "explicit",
         platform: "mobile",
         timestamp: Date.now(),
@@ -131,7 +138,19 @@ export function Auth({
 
   useEffect(() => {
     setInternalLoggedIn(loggedIn);
-  }, [loggedIn]);
+    if (loggedIn && !mobileAuthSuccess) {
+      // React Native may not have injected ReactNativeWebView yet — poll briefly
+      const tryPostAuth = (attemptsLeft: number) => {
+        if (isReactNativeWebView()) {
+          postAuthSuccessToWebView();
+          setMobileAuthSuccess(true);
+        } else if (attemptsLeft > 0) {
+          setTimeout(() => tryPostAuth(attemptsLeft - 1), 100);
+        }
+      };
+      tryPostAuth(10);
+    }
+  }, [loggedIn, mobileAuthSuccess]);
 
   useEffect(() => {
     if (totpRequired && totpInputRef.current) {
@@ -164,12 +183,6 @@ export function Auth({
         }
       });
   }, []);
-
-  useEffect(() => {
-    if (!registrationAllowed && !internalLoggedIn) {
-      toast.warning(t("messages.registrationDisabled"));
-    }
-  }, [registrationAllowed, internalLoggedIn, t]);
 
   useEffect(() => {
     if (!passwordLoginAllowed && oidcConfigured && tab !== "external") {
@@ -269,7 +282,7 @@ export function Auth({
       setUsername(meRes.username || null);
       setUserId(meRes.userId || null);
       setDbError(null);
-      postJWTToWebView();
+      postAuthSuccessToWebView();
 
       if (isReactNativeWebView()) {
         setLoggedIn(true);
@@ -469,16 +482,12 @@ export function Auth({
         throw new Error(t("errors.loginFailed"));
       }
 
-      if (isElectron() && res.token) {
-        localStorage.setItem("jwt", res.token);
-      }
-
       setIsAdmin(!!res.is_admin);
       setUsername(res.username || null);
       setUserId(res.userId || null);
       setDbError(null);
 
-      postJWTToWebView();
+      postAuthSuccessToWebView();
 
       if (isReactNativeWebView()) {
         setLoggedIn(true);
@@ -607,43 +616,41 @@ export function Auth({
 
       window.history.replaceState({}, document.title, window.location.pathname);
 
-      setTimeout(() => {
-        getUserInfo()
-          .then((meRes) => {
-            setIsAdmin(!!meRes.is_admin);
-            setUsername(meRes.username || null);
-            setUserId(meRes.userId || null);
-            setDbError(null);
-            postJWTToWebView();
+      if (isReactNativeWebView()) {
+        postAuthSuccessToWebView();
+        setMobileAuthSuccess(true);
+        setOidcLoading(false);
+        return;
+      }
 
-            if (isReactNativeWebView()) {
-              setMobileAuthSuccess(true);
-              setOidcLoading(false);
-              return;
-            }
+      getUserInfo()
+        .then((meRes) => {
+          setIsAdmin(!!meRes.is_admin);
+          setUsername(meRes.username || null);
+          setUserId(meRes.userId || null);
+          setDbError(null);
 
-            setLoggedIn(true);
-            onAuthSuccess({
-              isAdmin: !!meRes.is_admin,
-              username: meRes.username || null,
-              userId: meRes.userId || null,
-            });
-
-            setInternalLoggedIn(true);
-          })
-          .catch((err) => {
-            console.error("Failed to get user info after OIDC callback:", err);
-            setError(t("errors.failedUserInfo"));
-            setInternalLoggedIn(false);
-            setLoggedIn(false);
-            setIsAdmin(false);
-            setUsername(null);
-            setUserId(null);
-          })
-          .finally(() => {
-            setOidcLoading(false);
+          setLoggedIn(true);
+          onAuthSuccess({
+            isAdmin: !!meRes.is_admin,
+            username: meRes.username || null,
+            userId: meRes.userId || null,
           });
-      }, 200);
+
+          setInternalLoggedIn(true);
+        })
+        .catch((err) => {
+          console.error("Failed to get user info after OIDC callback:", err);
+          setError(t("errors.failedUserInfo"));
+          setInternalLoggedIn(false);
+          setLoggedIn(false);
+          setIsAdmin(false);
+          setUsername(null);
+          setUserId(null);
+        })
+        .finally(() => {
+          setOidcLoading(false);
+        });
     }
   }, []);
 
@@ -744,7 +751,10 @@ export function Auth({
             <Input
               ref={totpInputRef}
               id="totp-code"
+              name="totp"
               type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               placeholder="000000"
               maxLength={6}
               value={totpCode}

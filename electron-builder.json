@@ -5,7 +5,8 @@
   "directories": {
     "output": "release"
   },
-  "asar": false,
+  "asar": true,
+  "asarUnpack": ["dist/backend/**/*", "node_modules/**/*"],
   "files": [
     "dist/**/*",
     "electron/**/*",
@@ -116,8 +117,8 @@
     "type": "distribution",
     "minimumSystemVersion": "10.15",
     "mergeASARs": false,
-    "singleArchFiles": "**/*.node",
-    "x64ArchFiles": "**/*.node"
+    "singleArchFiles": "**/*.{node,bare}",
+    "x64ArchFiles": "**/*.{node,bare}"
   },
   "dmg": {
     "artifactName": "termix_macos_${arch}_dmg.${ext}",
@@ -130,7 +131,6 @@
     "entitlementsInherit": "build/entitlements.mas.inherit.plist",
     "hardenedRuntime": false,
     "gatekeeperAssess": false,
-    "asar": false,
     "type": "distribution",
     "category": "public.app-category.developer-tools",
     "artifactName": "termix_macos_${arch}_mas.${ext}",

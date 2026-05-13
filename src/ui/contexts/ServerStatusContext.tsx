@@ -80,7 +80,7 @@ export function ServerStatusProvider({
         return prev;
       });
       return enabled;
-    } catch (error) {
+    } catch {
       return new Set<number>();
     }
   }, [isAuthenticated]);

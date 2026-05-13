@@ -1,4 +1,5 @@
 import express from "express";
+import http from "http";
 import bodyParser from "body-parser";
 import multer from "multer";
 import cookieParser from "cookie-parser";
@@ -7,12 +8,12 @@ import hostRoutes from "./routes/host.js";
 import alertRoutes from "./routes/alerts.js";
 import credentialsRoutes from "./routes/credentials.js";
 import snippetsRoutes from "./routes/snippets.js";
+import c2sTunnelPresetRoutes from "./routes/c2s-tunnel-presets.js";
 import terminalRoutes from "./routes/terminal.js";
 import guacamoleRoutes from "../guacamole/routes.js";
 import networkTopologyRoutes from "./routes/network-topology.js";
 import rbacRoutes from "./routes/rbac.js";
-import cors from "cors";
-import fetch from "node-fetch";
+import { createCorsMiddleware } from "../utils/cors-config.js";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -58,39 +59,7 @@ app.set("trust proxy", true);
 const authManager = AuthManager.getInstance();
 const authenticateJWT = authManager.createAuthMiddleware();
 const requireAdmin = authManager.createAdminMiddleware();
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-
-      const allowedOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      if (origin.startsWith("https://")) {
-        return callback(null, true);
-      }
-
-      if (origin.startsWith("http://")) {
-        return callback(null, true);
-      }
-
-      callback(new Error("Not allowed by CORS"));
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "User-Agent",
-      "X-Electron-App",
-      "Accept",
-      "Origin",
-    ],
-  }),
-);
+app.use(createCorsMiddleware());
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -149,6 +118,31 @@ class GitHubCache {
 
 const githubCache = new GitHubCache();
 
+function parseSemver(
+  version: string | undefined,
+): [number, number, number] | null {
+  const match = String(version || "").match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match) return null;
+
+  return [Number(match[1]), Number(match[2]), Number(match[3] || 0)];
+}
+
+function compareSemver(
+  a: string | undefined,
+  b: string | undefined,
+): number | null {
+  const parsedA = parseSemver(a);
+  const parsedB = parseSemver(b);
+  if (!parsedA || !parsedB) return null;
+
+  for (let i = 0; i < 3; i += 1) {
+    if (parsedA[i] > parsedB[i]) return 1;
+    if (parsedA[i] < parsedB[i]) return -1;
+  }
+
+  return 0;
+}
+
 const GITHUB_API_BASE = "https://api.github.com";
 const REPO_OWNER = "Termix-SSH";
 const REPO_NAME = "Termix";
@@ -174,7 +168,7 @@ async function fetchGitHubAPI<T>(
         "User-Agent": "TermixUpdateChecker/1.0",
         "X-GitHub-Api-Version": "2022-11-28",
       },
-      agent: getProxyAgent(url),
+      dispatcher: getProxyAgent(url),
     });
 
     if (!response.ok) {
@@ -307,6 +301,10 @@ app.get("/version", authenticateJWT, async (req, res) => {
     return res.status(404).send("Local Version Not Set");
   }
 
+  if (req.query.checkRemote === "false") {
+    return res.json({ localVersion, status: "update_check_disabled" });
+  }
+
   try {
     const cacheKey = "latest_release";
     const releaseData = await fetchGitHubAPI<GitHubRelease>(
@@ -326,12 +324,19 @@ app.get("/version", authenticateJWT, async (req, res) => {
       return res.status(401).send("Remote Version Not Found");
     }
 
-    const isUpToDate = localVersion === remoteVersion;
+    const versionComparison = compareSemver(localVersion, remoteVersion);
+    const status =
+      versionComparison === null || versionComparison === 0
+        ? "up_to_date"
+        : versionComparison > 0
+          ? "beta"
+          : "requires_update";
 
     const response = {
-      status: isUpToDate ? "up_to_date" : "requires_update",
+      status,
       localVersion: localVersion,
       version: remoteVersion,
+      remoteVersion: remoteVersion,
       latest_release: {
         tag_name: releaseData.data.tag_name,
         name: releaseData.data.name,
@@ -603,7 +608,6 @@ app.post("/encryption/regenerate-jwt", requireAdmin, async (req, res) => {
 app.post("/database/export", authenticateJWT, async (req, res) => {
   try {
     const userId = (req as AuthenticatedRequest).userId;
-    const { password } = req.body;
     const deviceInfo = parseUserAgent(req);
 
     const user = await getDb().select().from(users).where(eq(users.id, userId));
@@ -613,30 +617,20 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
 
     const isOidcUser = !!user[0].isOidc;
 
-    if (!isOidcUser) {
-      if (!password) {
-        return res.status(400).json({
-          error: "Password required for export",
-          code: "PASSWORD_REQUIRED",
-        });
-      }
-
-      const unlocked = await authManager.authenticateUser(
-        userId,
-        password,
-        deviceInfo.type,
-      );
-      if (!unlocked) {
-        return res.status(401).json({ error: "Invalid password" });
-      }
-    } else if (!DataCrypto.getUserDataKey(userId)) {
-      const oidcUnlocked = await authManager.authenticateOIDCUser(
-        userId,
-        deviceInfo.type,
-      );
-      if (!oidcUnlocked) {
+    if (!DataCrypto.getUserDataKey(userId)) {
+      if (isOidcUser) {
+        const oidcUnlocked = await authManager.authenticateOIDCUser(
+          userId,
+          deviceInfo.type,
+        );
+        if (!oidcUnlocked) {
+          return res.status(403).json({
+            error: "Failed to unlock user data with SSO credentials",
+          });
+        }
+      } else {
         return res.status(403).json({
-          error: "Failed to unlock user data with SSO credentials",
+          error: "User data is locked. Please log in again.",
         });
       }
     }
@@ -651,10 +645,7 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
       throw new Error("User data not unlocked");
     }
 
-    const tempDir =
-      process.env.NODE_ENV === "production"
-        ? path.join(process.env.DATA_DIR || "./db/data", ".temp", "exports")
-        : path.join(os.tmpdir(), "termix-exports");
+    const tempDir = path.join(os.tmpdir(), "termix-exports");
 
     try {
       if (!fs.existsSync(tempDir)) {
@@ -665,7 +656,9 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
         operation: "export_temp_dir_error",
         tempDir,
       });
-      throw new Error(`Failed to create temp directory: ${dirError.message}`);
+      throw new Error(`Failed to create temp directory: ${dirError.message}`, {
+        cause: dirError,
+      });
     }
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -710,6 +703,7 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
         CREATE TABLE ssh_data (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           user_id TEXT NOT NULL,
+          connection_type TEXT NOT NULL DEFAULT 'ssh',
           name TEXT,
           ip TEXT NOT NULL,
           port INTEGER NOT NULL,
@@ -742,6 +736,7 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
           show_server_stats_in_sidebar INTEGER NOT NULL DEFAULT 0,
           default_path TEXT,
           stats_config TEXT,
+          docker_config TEXT,
           terminal_config TEXT,
           quick_actions TEXT,
           notes TEXT,
@@ -751,6 +746,12 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
           socks5_username TEXT,
           socks5_password TEXT,
           socks5_proxy_chain TEXT,
+          domain TEXT,
+          security TEXT,
+          ignore_cert INTEGER NOT NULL DEFAULT 0,
+          guacamole_config TEXT,
+          mac_address TEXT,
+          port_knock_sequence TEXT,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -763,7 +764,7 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
           folder TEXT,
           tags TEXT,
           auth_type TEXT NOT NULL,
-          username TEXT NOT NULL,
+          username TEXT,
           password TEXT,
           key TEXT,
           private_key TEXT,
@@ -850,8 +851,8 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
         .from(hosts)
         .where(eq(hosts.userId, userId));
       const insertHost = exportDb.prepare(`
-        INSERT INTO ssh_data (id, user_id, name, ip, port, username, folder, tags, pin, auth_type, force_keyboard_interactive, password, key, key_password, key_type, sudo_password, autostart_password, autostart_key, autostart_key_password, credential_id, override_credential_username, enable_terminal, enable_tunnel, tunnel_connections, jump_hosts, enable_file_manager, enable_docker, show_terminal_in_sidebar, show_file_manager_in_sidebar, show_tunnel_in_sidebar, show_docker_in_sidebar, show_server_stats_in_sidebar, default_path, stats_config, terminal_config, quick_actions, notes, use_socks5, socks5_host, socks5_port, socks5_username, socks5_password, socks5_proxy_chain, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ssh_data (id, user_id, connection_type, name, ip, port, username, folder, tags, pin, auth_type, force_keyboard_interactive, password, key, key_password, key_type, sudo_password, autostart_password, autostart_key, autostart_key_password, credential_id, override_credential_username, enable_terminal, enable_tunnel, tunnel_connections, jump_hosts, enable_file_manager, enable_docker, show_terminal_in_sidebar, show_file_manager_in_sidebar, show_tunnel_in_sidebar, show_docker_in_sidebar, show_server_stats_in_sidebar, default_path, stats_config, docker_config, terminal_config, quick_actions, notes, use_socks5, socks5_host, socks5_port, socks5_username, socks5_password, socks5_proxy_chain, domain, security, ignore_cert, guacamole_config, mac_address, port_knock_sequence, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const host of sshHosts) {
@@ -864,6 +865,7 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
         insertHost.run(
           decrypted.id,
           decrypted.userId,
+          decrypted.connectionType || "ssh",
           decrypted.name || null,
           decrypted.ip,
           decrypted.port,
@@ -896,6 +898,7 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
           decrypted.showServerStatsInSidebar ? 1 : 0,
           decrypted.defaultPath || null,
           decrypted.statsConfig || null,
+          decrypted.dockerConfig || null,
           decrypted.terminalConfig || null,
           decrypted.quickActions || null,
           decrypted.notes || null,
@@ -905,6 +908,12 @@ app.post("/database/export", authenticateJWT, async (req, res) => {
           decrypted.socks5Username || null,
           decrypted.socks5Password || null,
           decrypted.socks5ProxyChain || null,
+          decrypted.domain || null,
+          decrypted.security || null,
+          decrypted.ignoreCert ? 1 : 0,
+          decrypted.guacamoleConfig || null,
+          decrypted.macAddress || null,
+          decrypted.portKnockSequence || null,
           decrypted.createdAt,
           decrypted.updatedAt,
         );
@@ -1146,7 +1155,6 @@ app.post(
       }
 
       const userId = (req as AuthenticatedRequest).userId;
-      const { password } = req.body;
       const mainDb = getDb();
       const deviceInfo = parseUserAgent(req);
 
@@ -1161,30 +1169,20 @@ app.post(
 
       const isOidcUser = !!userRecords[0].isOidc;
 
-      if (!isOidcUser) {
-        if (!password) {
-          return res.status(400).json({
-            error: "Password required for import",
-            code: "PASSWORD_REQUIRED",
-          });
-        }
-
-        const unlocked = await authManager.authenticateUser(
-          userId,
-          password,
-          deviceInfo.type,
-        );
-        if (!unlocked) {
-          return res.status(401).json({ error: "Invalid password" });
-        }
-      } else if (!DataCrypto.getUserDataKey(userId)) {
-        const oidcUnlocked = await authManager.authenticateOIDCUser(
-          userId,
-          deviceInfo.type,
-        );
-        if (!oidcUnlocked) {
+      if (!DataCrypto.getUserDataKey(userId)) {
+        if (isOidcUser) {
+          const oidcUnlocked = await authManager.authenticateOIDCUser(
+            userId,
+            deviceInfo.type,
+          );
+          if (!oidcUnlocked) {
+            return res.status(403).json({
+              error: "Failed to unlock user data with SSO credentials",
+            });
+          }
+        } else {
           return res.status(403).json({
-            error: "Failed to unlock user data with SSO credentials",
+            error: "User data is locked. Please log in again.",
           });
         }
       }
@@ -1197,16 +1195,7 @@ app.post(
         mimetype: req.file.mimetype,
       });
 
-      let userDataKey = DataCrypto.getUserDataKey(userId);
-      if (!userDataKey && isOidcUser) {
-        const oidcUnlocked = await authManager.authenticateOIDCUser(
-          userId,
-          deviceInfo.type,
-        );
-        if (oidcUnlocked) {
-          userDataKey = DataCrypto.getUserDataKey(userId);
-        }
-      }
+      const userDataKey = DataCrypto.getUserDataKey(userId);
       if (!userDataKey) {
         throw new Error("User data not unlocked");
       }
@@ -1766,6 +1755,7 @@ app.use("/", hostRoutes);
 app.use("/alerts", alertRoutes);
 app.use("/credentials", credentialsRoutes);
 app.use("/snippets", snippetsRoutes);
+app.use("/c2s-tunnel-presets", c2sTunnelPresetRoutes);
 app.use("/terminal", terminalRoutes);
 app.use("/guacamole", guacamoleRoutes);
 app.use("/network-topology", networkTopologyRoutes);
@@ -1785,10 +1775,38 @@ if (frontendDist) {
   databaseLogger.info(`Serving frontend from: ${frontendDist}`, {
     operation: "static_files",
   });
-  app.use(express.static(frontendDist));
+  app.use(
+    express.static(frontendDist, {
+      setHeaders: (res, filePath) => {
+        const relativePath = path
+          .relative(frontendDist, filePath)
+          .replaceAll(path.sep, "/");
+
+        if (relativePath.startsWith("assets/")) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          return;
+        }
+
+        if (
+          relativePath === "index.html" ||
+          relativePath === "sw.js" ||
+          relativePath === "manifest.json"
+        ) {
+          res.setHeader(
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+          );
+        }
+      },
+    }),
+  );
 
   app.use((req, res, next) => {
     if (req.method === "GET" && req.accepts("html")) {
+      res.setHeader(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+      );
       res.sendFile(path.join(frontendDist, "index.html"));
     } else {
       next();
@@ -1797,13 +1815,13 @@ if (frontendDist) {
 }
 
 app.use(
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   (
     err: unknown,
     req: express.Request,
     res: express.Response,
     _next: express.NextFunction,
   ) => {
+    void _next;
     apiLogger.error("Unhandled error in request", err, {
       operation: "error_handler",
       method: req.method,
@@ -1984,7 +2002,24 @@ app.get(
   },
 );
 
-app.listen(HTTP_PORT, async () => {
+const httpServer = http.createServer(app);
+
+httpServer.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    databaseLogger.error(
+      `Port ${HTTP_PORT} is already in use. Kill the existing process and retry.`,
+      err,
+      {
+        operation: "http_server_port_conflict",
+        port: HTTP_PORT,
+      },
+    );
+    process.exit(1);
+  }
+  throw err;
+});
+
+httpServer.listen(HTTP_PORT, async () => {
   const uploadsDir = path.join(process.cwd(), "uploads");
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });

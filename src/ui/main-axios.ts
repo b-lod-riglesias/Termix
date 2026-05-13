@@ -1,6 +1,7 @@
 import axios, { AxiosError, type AxiosInstance } from "axios";
 import { toast } from "sonner";
 import { getBasePath } from "@/lib/base-path";
+import { isElectron } from "@/lib/electron";
 import { clearTermixSessionStorage } from "@/ui/desktop/navigation/tabs/TabContext";
 import type {
   SSHHost,
@@ -8,6 +9,8 @@ import type {
   SSHFolder,
   TunnelConfig,
   TunnelStatus,
+  TunnelConnection,
+  C2STunnelPreset,
   FileManagerFile,
   FileManagerShortcut,
   DockerContainer,
@@ -86,6 +89,27 @@ export type SSHHostWithStatus = SSHHost & {
   status: "online" | "offline" | "unknown";
 };
 
+type ApiConnectionLog = {
+  type: "info" | "success" | "warning" | "error";
+  stage: string;
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+type ConnectErrorResponse = {
+  error?: string;
+  message?: string;
+  connectionLogs?: ApiConnectionLog[];
+  requires_totp?: boolean;
+  requires_warpgate?: boolean;
+  sessionId?: string;
+  prompt?: string;
+  url?: string;
+  securityKey?: string;
+  status?: string;
+  reason?: string;
+};
+
 interface CpuMetrics {
   percent: number | null;
   cores: number | null;
@@ -113,7 +137,6 @@ export type ServerMetrics = {
 };
 
 interface AuthResponse {
-  token: string;
   success?: boolean;
   is_admin?: boolean;
   username?: string;
@@ -144,34 +167,24 @@ interface OIDCAuthorize {
   auth_url: string;
 }
 
+type ElectronApi = {
+  isElectron?: boolean;
+  getSetting?: (key: string) => Promise<string | null | undefined>;
+  setSetting?: (key: string, value: string) => Promise<void>;
+};
+
+type ElectronWindow = Window &
+  typeof globalThis & {
+    IS_ELECTRON?: boolean;
+    electronAPI?: ElectronApi;
+    ReactNativeWebView?: unknown;
+  };
+
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
 
-export function isElectron(): boolean {
-  const hasISElectron =
-    (
-      window as Window &
-        typeof globalThis & {
-          IS_ELECTRON?: boolean;
-          electronAPI?: unknown;
-          configuredServerUrl?: string;
-        }
-    ).IS_ELECTRON === true;
-
-  const hasElectronAPI = !!(
-    window as Window &
-      typeof globalThis & {
-        IS_ELECTRON?: boolean;
-        electronAPI?: unknown;
-        configuredServerUrl?: string;
-      }
-  ).electronAPI;
-
-  const result = hasISElectron || hasElectronAPI;
-
-  return result;
-}
+export { isElectron };
 
 function getLoggerForService(serviceName: string) {
   if (serviceName.includes("SSH") || serviceName.includes("ssh")) {
@@ -199,20 +212,22 @@ const electronSettingsCache = new Map<string, string>();
 if (isElectron()) {
   (async () => {
     try {
-      const electronAPI = (
-        window as Window &
-          typeof globalThis & {
-            electronAPI?: any;
-          }
-      ).electronAPI;
+      const electronAPI = (window as ElectronWindow).electronAPI;
 
       if (electronAPI?.getSetting) {
-        const settingsToLoad = ["rightClickCopyPaste", "jwt"];
+        const settingsToLoad = ["rightClickCopyPaste"];
         for (const key of settingsToLoad) {
           const value = await electronAPI.getSetting(key);
           if (value !== null && value !== undefined) {
-            electronSettingsCache.set(key, value);
-            localStorage.setItem(key, value);
+            // Only populate if not already set to prevent overwriting new values during login
+            if (!localStorage.getItem(key)) {
+              electronSettingsCache.set(key, value);
+              localStorage.setItem(key, value);
+              console.log(`[Electron] Loaded setting ${key} from main process`);
+            } else {
+              // Even if we don't overwrite localStorage, update the cache
+              electronSettingsCache.set(key, localStorage.getItem(key)!);
+            }
           }
         }
       }
@@ -222,27 +237,28 @@ if (isElectron()) {
   })();
 }
 
-export function setCookie(name: string, value: string, days = 7): void {
+export function setCookie(
+  name: string,
+  value: string,
+  days = 7,
+): void | Promise<void> {
   if (isElectron()) {
     try {
-      electronSettingsCache.set(name, value);
+      if (name === "jwt") {
+        return;
+      }
 
-      localStorage.setItem(name, value);
-
-      const electronAPI = (
-        window as Window &
-          typeof globalThis & {
-            electronAPI?: any;
-          }
-      ).electronAPI;
+      const electronAPI = (window as ElectronWindow).electronAPI;
 
       if (electronAPI?.setSetting) {
+        electronSettingsCache.set(name, value);
+        localStorage.setItem(name, value);
         electronAPI.setSetting(name, value).catch((err: Error) => {
           console.error(`[Electron] Failed to persist setting ${name}:`, err);
         });
       }
 
-      console.log(`[Electron] Set setting: ${name} = ${value}`);
+      console.log(`[Electron] Set setting: ${name}`);
     } catch (error) {
       console.error(`[Electron] Failed to set setting: ${name}`, error);
     }
@@ -258,6 +274,10 @@ export function getCookie(name: string): string | undefined {
 
   if (isElectron()) {
     try {
+      if (name === "jwt") {
+        return undefined;
+      }
+
       if (electronSettingsCache.has(name)) {
         return electronSettingsCache.get(name);
       }
@@ -359,6 +379,44 @@ export function getProxyAwareWebSocketUrl(
 }
 
 let userWasAuthenticated = false;
+let latestAuthSuccessAt = 0;
+
+function markUserAuthenticated(): void {
+  userWasAuthenticated = true;
+  latestAuthSuccessAt =
+    typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+export function isCurrentAuthInvalidationError(error: unknown): boolean {
+  const authError = error as {
+    __staleAuthInvalidation?: boolean;
+  };
+
+  if (authError.__staleAuthInvalidation) {
+    return false;
+  }
+
+  const axiosError = error as AxiosError;
+  const apiError = error as ApiError;
+  const responseData = axiosError.response?.data as
+    | Record<string, unknown>
+    | undefined;
+  const errorCode = responseData?.code || apiError.code;
+  const errorMessage = responseData?.error || apiError.message;
+  const status = axiosError.response?.status || apiError.status;
+  const isMissingAuthenticationToken =
+    errorMessage === "Missing authentication token";
+
+  return (
+    status === 401 &&
+    (errorCode === "SESSION_EXPIRED" ||
+      errorCode === "SESSION_NOT_FOUND" ||
+      (errorCode === "AUTH_REQUIRED" && userWasAuthenticated) ||
+      errorMessage === "Invalid token" ||
+      (errorMessage === "Authentication required" && userWasAuthenticated) ||
+      (isMissingAuthenticationToken && userWasAuthenticated))
+  );
+}
 
 function createApiInstance(
   baseURL: string,
@@ -375,8 +433,9 @@ function createApiInstance(
     const startTime = performance.now();
     const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    (config as any).startTime = startTime;
-    (config as any).requestId = requestId;
+    const configWithMetadata = config as AxiosRequestConfigExtended;
+    configWithMetadata.startTime = startTime;
+    configWithMetadata.requestId = requestId;
 
     const method = config.method?.toUpperCase() || "UNKNOWN";
     const url = config.url || "UNKNOWN";
@@ -391,7 +450,9 @@ function createApiInstance(
 
     const logger = getLoggerForService(serviceName);
 
-    if (process.env.NODE_ENV === "development") {
+    const isDevMode = process.env.NODE_ENV === "development";
+
+    if (isDevMode) {
       logger.requestStart(method, fullUrl, context);
     }
 
@@ -404,10 +465,25 @@ function createApiInstance(
     }
 
     if (isElectron()) {
-      config.headers["X-Electron-App"] = "true";
+      if (config.headers.set) {
+        config.headers.set("X-Electron-App", "true");
+      } else {
+        config.headers["X-Electron-App"] = "true";
+      }
+      const jwt = localStorage.getItem("jwt");
+      if (jwt) {
+        if (config.headers.set) {
+          config.headers.set("Authorization", `Bearer ${jwt}`);
+        } else {
+          config.headers["Authorization"] = `Bearer ${jwt}`;
+        }
+      }
     }
 
-    if (typeof window !== "undefined" && (window as any).ReactNativeWebView) {
+    if (
+      typeof window !== "undefined" &&
+      (window as ElectronWindow).ReactNativeWebView
+    ) {
       let platform = "Unknown";
       if (typeof navigator !== "undefined" && navigator.userAgent) {
         if (navigator.userAgent.includes("Android")) {
@@ -420,15 +496,10 @@ function createApiInstance(
           platform = "iOS";
         }
       }
-      config.headers["User-Agent"] = `Termix-Mobile/${platform}`;
-    }
-
-    if (!isElectron()) {
-      const token = document.cookie
-        .split("; ")
-        .find((row) => row.startsWith("jwt="));
-      if (token) {
-        userWasAuthenticated = true;
+      if (config.headers.set) {
+        config.headers.set("User-Agent", `Termix-Mobile/${platform}`);
+      } else {
+        config.headers["User-Agent"] = `Termix-Mobile/${platform}`;
       }
     }
 
@@ -438,8 +509,9 @@ function createApiInstance(
   instance.interceptors.response.use(
     (response: AxiosResponse) => {
       const endTime = performance.now();
-      const startTime = (response.config as any).startTime;
-      const requestId = (response.config as any).requestId;
+      const responseConfig = response.config as AxiosRequestConfigExtended;
+      const startTime = responseConfig.startTime;
+      const requestId = responseConfig.requestId;
       const responseTime = Math.round(endTime - (startTime || endTime));
 
       const method = response.config.method?.toUpperCase() || "UNKNOWN";
@@ -507,8 +579,11 @@ function createApiInstance(
       };
 
       const logger = getLoggerForService(serviceName);
+      // A caller can mark a request as a silent retry (see progressive /status
+      // retry) so we don't spam error logs / health events on each attempt.
+      const isSilentRetry = !!error.config?.__silentRetry;
 
-      if (process.env.NODE_ENV === "development") {
+      if (process.env.NODE_ENV === "development" && !isSilentRetry) {
         if (status === 401) {
           logger.authError(method, fullUrl, context);
         } else if (status === 0 || !status) {
@@ -532,19 +607,34 @@ function createApiInstance(
           ?.error;
         const isSessionExpired = errorCode === "SESSION_EXPIRED";
         const isSessionNotFound = errorCode === "SESSION_NOT_FOUND";
+        const isMissingAuthenticationToken =
+          errorMessage === "Missing authentication token";
         const isInvalidToken =
           errorCode === "AUTH_REQUIRED" ||
           errorMessage === "Invalid token" ||
           errorMessage === "Authentication required" ||
-          errorMessage === "Missing authentication token";
+          (isMissingAuthenticationToken && userWasAuthenticated);
 
         if (isSessionExpired || isSessionNotFound || isInvalidToken) {
+          const requestStartedAt =
+            typeof error.config?.startTime === "number"
+              ? error.config.startTime
+              : 0;
+          const isStaleAuthInvalidation =
+            latestAuthSuccessAt > 0 &&
+            requestStartedAt > 0 &&
+            requestStartedAt < latestAuthSuccessAt;
+
+          if (isStaleAuthInvalidation) {
+            (
+              error as { __staleAuthInvalidation?: boolean }
+            ).__staleAuthInvalidation = true;
+            return Promise.reject(error);
+          }
+
           const wasAuthenticated = userWasAuthenticated;
 
-          localStorage.removeItem("jwt");
-
           if (isElectron()) {
-            electronSettingsCache.delete("jwt");
             const electronAPI = (
               window as unknown as {
                 electronAPI?: { clearSessionCookies?: () => Promise<void> };
@@ -563,14 +653,12 @@ function createApiInstance(
             toast.warning("Session expired. Please log in again.");
           }
 
-          if (wasAuthenticated) {
-            dbHealthMonitor.reportSessionExpired();
-          }
+          dbHealthMonitor.reportSessionExpired();
 
           userWasAuthenticated = false;
         }
-      } else {
-        const wasAuthenticated = !!localStorage.getItem("jwt");
+      } else if (!isSilentRetry) {
+        const wasAuthenticated = userWasAuthenticated;
         dbHealthMonitor.reportDatabaseError(error, wasAuthenticated);
       }
 
@@ -612,10 +700,7 @@ export interface ServerConfig {
 interface AxiosRequestConfigExtended extends AxiosRequestConfig {
   startTime?: number;
   requestId?: string;
-}
-
-interface AxiosResponseExtended extends AxiosResponse {
-  config: AxiosRequestConfigExtended;
+  __silentRetry?: boolean;
 }
 
 interface AxiosErrorExtended extends AxiosError {
@@ -680,10 +765,7 @@ export function getConfiguredServerUrl(): string | null {
 interface AxiosRequestConfigExtended extends AxiosRequestConfig {
   startTime?: number;
   requestId?: string;
-}
-
-interface AxiosResponseExtended extends AxiosResponse {
-  config: AxiosRequestConfigExtended;
+  __silentRetry?: boolean;
 }
 
 interface AxiosErrorExtended extends AxiosError {
@@ -714,7 +796,7 @@ export async function testServerConnection(
 
 export async function checkElectronUpdate(): Promise<{
   success: boolean;
-  status?: "up_to_date" | "requires_update";
+  status?: "up_to_date" | "requires_update" | "beta";
   localVersion?: string;
   remoteVersion?: string;
   latest_release?: {
@@ -869,6 +951,9 @@ export let rbacApi: AxiosInstance;
 // Docker Management API (port 30007)
 export let dockerApi: AxiosInstance;
 
+// Pre-initialize with default values to avoid undefined errors during early mounting
+initializeApiInstances();
+
 function initializeApp() {
   if (isElectron()) {
     Promise.all([getServerConfig(), getEmbeddedServerStatus()])
@@ -985,7 +1070,7 @@ function handleApiError(error: unknown, operation: string): never {
         ? message
         : "Authentication required. Please log in again.";
 
-      throw new ApiError(errorMessage, 401, "AUTH_REQUIRED");
+      throw new ApiError(errorMessage, 401, code || "AUTH_REQUIRED");
     } else if (status === 403) {
       authLogger.warn(`Access denied: ${method} ${url}`, errorContext);
       const apiError = new ApiError(
@@ -1089,7 +1174,9 @@ function handleApiError(error: unknown, operation: string): never {
 export async function getSSHHosts(): Promise<SSHHostWithStatus[]> {
   try {
     const hostsResponse = await sshHostApi.get("/db/host");
-    const hosts: SSHHost[] = hostsResponse.data;
+    const hosts: SSHHost[] = Array.isArray(hostsResponse.data)
+      ? hostsResponse.data
+      : [];
 
     let statusesResponse: Record<number, ServerStatus> = {};
     try {
@@ -1164,6 +1251,8 @@ export async function createSSHHost(hostData: SSHHostData): Promise<SSHHost> {
       socks5Username: hostData.socks5Username || null,
       socks5Password: hostData.socks5Password || null,
       socks5ProxyChain: hostData.socks5ProxyChain || null,
+      macAddress: hostData.macAddress || null,
+      portKnockSequence: hostData.portKnockSequence || null,
     };
 
     if (!submitData.enableTunnel) {
@@ -1251,6 +1340,8 @@ export async function updateSSHHost(
       socks5Username: hostData.socks5Username || null,
       socks5Password: hostData.socks5Password || null,
       socks5ProxyChain: hostData.socks5ProxyChain || null,
+      macAddress: hostData.macAddress || null,
+      portKnockSequence: hostData.portKnockSequence || null,
     };
 
     if (!submitData.enableTunnel) {
@@ -1278,6 +1369,15 @@ export async function updateSSHHost(
     }
   } catch (error) {
     throw handleApiError(error, "update SSH host");
+  }
+}
+
+export async function wakeOnLan(hostId: number): Promise<{ success: boolean }> {
+  try {
+    const response = await sshHostApi.post(`/db/host/${hostId}/wake`);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "wake on LAN");
   }
 }
 
@@ -1346,6 +1446,17 @@ export async function exportSSHHostWithCredentials(
     return response.data;
   } catch (error) {
     handleApiError(error, "export SSH host with credentials");
+  }
+}
+
+export async function exportAllSSHHosts(): Promise<{
+  hosts: SSHHost[];
+}> {
+  try {
+    const response = await sshHostApi.get("/db/hosts/export");
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "export all SSH hosts");
   }
 }
 
@@ -1438,6 +1549,30 @@ export async function getTunnelStatuses(): Promise<
   }
 }
 
+export function subscribeTunnelStatuses(
+  onStatuses: (statuses: Record<string, TunnelStatus>) => void,
+  onError?: () => void,
+): () => void {
+  const baseURL = (tunnelApi.defaults.baseURL || "").replace(/\/$/, "");
+  const source = new EventSource(`${baseURL}/tunnel/status/stream`, {
+    withCredentials: true,
+  });
+
+  source.addEventListener("statuses", (event) => {
+    try {
+      onStatuses(JSON.parse(event.data) as Record<string, TunnelStatus>);
+    } catch {
+      onError?.();
+    }
+  });
+
+  source.onerror = () => {
+    onError?.();
+  };
+
+  return () => source.close();
+}
+
 export async function getTunnelStatusByName(
   tunnelName: string,
 ): Promise<TunnelStatus | undefined> {
@@ -1475,6 +1610,60 @@ export async function cancelTunnel(
     return response.data;
   } catch (error) {
     handleApiError(error, "cancel tunnel");
+  }
+}
+
+export async function getC2STunnelPresets(): Promise<C2STunnelPreset[]> {
+  try {
+    const response = await authApi.get("/c2s-tunnel-presets");
+    return response.data || [];
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return [];
+    }
+    handleApiError(error, "fetch client tunnel presets");
+  }
+}
+
+export async function createC2STunnelPreset(data: {
+  name: string;
+  config: TunnelConnection[];
+  platform?: string;
+  computerName?: string;
+}): Promise<C2STunnelPreset> {
+  try {
+    const response = await authApi.post("/c2s-tunnel-presets", data);
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "create client tunnel preset");
+  }
+}
+
+export async function updateC2STunnelPreset(
+  id: number,
+  data: Partial<{
+    name: string;
+    config: TunnelConnection[];
+    platform: string;
+    computerName: string;
+  }>,
+): Promise<C2STunnelPreset> {
+  try {
+    const response = await authApi.put(`/c2s-tunnel-presets/${id}`, data);
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "update client tunnel preset");
+  }
+}
+
+export async function deleteC2STunnelPreset(
+  id: number,
+): Promise<Record<string, unknown>> {
+  try {
+    const response = await authApi.delete(`/c2s-tunnel-presets/${id}`);
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "delete client tunnel preset");
   }
 }
 
@@ -1617,7 +1806,7 @@ export async function connectSSH(
     socks5Username?: string;
     socks5Password?: string;
     socks5ProxyChain?: unknown;
-    jumpHosts?: any[];
+    jumpHosts?: Array<{ hostId: number }>;
   },
 ): Promise<Record<string, unknown>> {
   try {
@@ -1626,29 +1815,38 @@ export async function connectSSH(
       ...config,
     });
     return response.data;
-  } catch (error: any) {
-    if (error?.response?.data?.connectionLogs) {
+  } catch (error: unknown) {
+    if (
+      axios.isAxiosError<ConnectErrorResponse>(error) &&
+      error.response?.data?.connectionLogs
+    ) {
+      const data = error.response.data;
       const errorWithLogs = new Error(
-        error?.response?.data?.error ||
-          error?.response?.data?.message ||
-          error.message,
+        data.error || data.message || error.message,
       );
-      (errorWithLogs as any).connectionLogs =
-        error.response.data.connectionLogs;
-      if (error.response.data.requires_totp) {
-        (errorWithLogs as any).requires_totp = true;
-        (errorWithLogs as any).sessionId = error.response.data.sessionId;
-        (errorWithLogs as any).prompt = error.response.data.prompt;
+      Object.assign(errorWithLogs, {
+        connectionLogs: data.connectionLogs,
+      });
+      if (data.requires_totp) {
+        Object.assign(errorWithLogs, {
+          requires_totp: true,
+          sessionId: data.sessionId,
+          prompt: data.prompt,
+        });
       }
-      if (error.response.data.requires_warpgate) {
-        (errorWithLogs as any).requires_warpgate = true;
-        (errorWithLogs as any).sessionId = error.response.data.sessionId;
-        (errorWithLogs as any).url = error.response.data.url;
-        (errorWithLogs as any).securityKey = error.response.data.securityKey;
+      if (data.requires_warpgate) {
+        Object.assign(errorWithLogs, {
+          requires_warpgate: true,
+          sessionId: data.sessionId,
+          url: data.url,
+          securityKey: data.securityKey,
+        });
       }
-      if (error.response.data.status === "auth_required") {
-        (errorWithLogs as any).status = "auth_required";
-        (errorWithLogs as any).reason = error.response.data.reason;
+      if (data.status === "auth_required") {
+        Object.assign(errorWithLogs, {
+          status: "auth_required",
+          reason: data.reason,
+        });
       }
       throw errorWithLogs;
     }
@@ -2390,15 +2588,81 @@ export async function removeFolderShortcut(
 // SERVER STATISTICS
 // ============================================================================
 
+/**
+ * Progressive retry schedule for the background /status poll.
+ *
+ * Each entry describes one attempt's per-request timeout and the pause to
+ * observe before the next attempt. The pause on the last entry is `null`:
+ * after that final failure we surface the network error, which flows
+ * through the response interceptor + dbHealthMonitor (which decides
+ * between the degraded toast and the full-outage overlay based on whether
+ * any WebSocket is still alive).
+ *
+ * Sequence: try(2s) -> wait 3s -> try(5s) -> wait 5s -> try(8s) -> fail.
+ * Worst-case wall-clock = 23s, which fits inside the 30s ServerStatusContext
+ * poll cadence, so the next tick acts as the next retry without overlap.
+ */
+const STATUS_RETRY_SCHEDULE: ReadonlyArray<{
+  timeoutMs: number;
+  pauseAfterMs: number | null;
+}> = [
+  { timeoutMs: 2000, pauseAfterMs: 3000 },
+  { timeoutMs: 5000, pauseAfterMs: 5000 },
+  { timeoutMs: 8000, pauseAfterMs: null },
+];
+
+function isTransientStatusError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false;
+  if (error.response) {
+    // Definitive server response (even 5xx) is not something more retries
+    // will fix in a useful timeframe; bail out and report it normally.
+    return false;
+  }
+  const code = error.code;
+  if (!code) {
+    // No code + no response means classic network error (offline / DNS / TCP)
+    return true;
+  }
+  return (
+    code === "ECONNABORTED" ||
+    code === "ETIMEDOUT" ||
+    code === "ERR_NETWORK" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET"
+  );
+}
+
 export async function getAllServerStatuses(): Promise<
   Record<number, ServerStatus>
 > {
-  try {
-    const response = await statsApi.get("/status");
-    return response.data || {};
-  } catch (error) {
-    handleApiError(error, "fetch server statuses");
+  let lastError: unknown = null;
+
+  for (let i = 0; i < STATUS_RETRY_SCHEDULE.length; i++) {
+    const { timeoutMs, pauseAfterMs } = STATUS_RETRY_SCHEDULE[i];
+    const isFinalAttempt = i === STATUS_RETRY_SCHEDULE.length - 1;
+
+    try {
+      const response = await statsApi.get("/status", {
+        timeout: timeoutMs,
+        // Silence per-attempt interceptor logging & health-monitor side
+        // effects on all attempts except the final one, so background
+        // blips don't look like real outages.
+        __silentRetry: !isFinalAttempt,
+      } as AxiosRequestConfig & { __silentRetry?: boolean });
+      return response.data || {};
+    } catch (error) {
+      lastError = error;
+      if (!isTransientStatusError(error)) {
+        break;
+      }
+      if (pauseAfterMs === null) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pauseAfterMs));
+    }
   }
+
+  handleApiError(lastError, "fetch server statuses");
 }
 
 export async function getServerStatusById(id: number): Promise<ServerStatus> {
@@ -2411,11 +2675,25 @@ export async function getServerStatusById(id: number): Promise<ServerStatus> {
   }
 }
 
-export async function getServerMetricsById(id: number): Promise<ServerMetrics> {
+export async function getServerMetricsById(
+  id: number,
+): Promise<ServerMetrics | null> {
   try {
-    const response = await statsApi.get(`/metrics/${id}`);
+    const response = await statsApi.get(`/metrics/${id}`, {
+      // Treat 404 as an expected "no metrics yet / disabled" signal rather
+      // than an error so we don't spam warn logs on the client.
+      validateStatus: (status) => status === 200 || status === 404,
+    });
+    if (response.status === 404) {
+      return null;
+    }
     return response.data;
   } catch (error) {
+    // If a 404 still slips through (e.g. intercepted before reaching here),
+    // swallow it quietly; everything else still flows through handleApiError.
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null;
+    }
     handleApiError(error, "fetch server metrics");
     throw error;
   }
@@ -2427,18 +2705,23 @@ export async function startMetricsPolling(hostId: number): Promise<{
   sessionId?: string;
   prompt?: string;
   viewerSessionId?: string;
-  connectionLogs?: any[];
+  connectionLogs?: ApiConnectionLog[];
 }> {
   try {
     const response = await statsApi.post(`/metrics/start/${hostId}`);
     return response.data;
-  } catch (error: any) {
-    if (error?.response?.data?.connectionLogs) {
+  } catch (error: unknown) {
+    if (
+      axios.isAxiosError<ConnectErrorResponse>(error) &&
+      error.response?.data?.connectionLogs
+    ) {
+      const data = error.response.data;
       const errorWithLogs = new Error(
-        error?.response?.data?.error || error.message,
+        data.error || data.message || error.message,
       );
-      (errorWithLogs as any).connectionLogs =
-        error.response.data.connectionLogs;
+      Object.assign(errorWithLogs, {
+        connectionLogs: data.connectionLogs,
+      });
       throw errorWithLogs;
     }
     handleApiError(error, "start metrics polling");
@@ -2469,9 +2752,12 @@ export async function sendMetricsHeartbeat(
   }
 }
 
-export async function registerMetricsViewer(
-  hostId: number,
-): Promise<{ success: boolean; viewerSessionId: string }> {
+export async function registerMetricsViewer(hostId: number): Promise<{
+  success: boolean;
+  viewerSessionId?: string;
+  skipped?: boolean;
+  reason?: string;
+}> {
   try {
     const response = await statsApi.post("/metrics/register-viewer", {
       hostId,
@@ -2563,6 +2849,50 @@ export async function updateGlobalMonitoringSettings(settings: {
 }
 
 // ============================================================================
+// LOG LEVEL SETTINGS
+// ============================================================================
+
+export async function getLogLevel(): Promise<{ level: string }> {
+  try {
+    const response = await authApi.get("/users/log-level");
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "fetch log level");
+  }
+}
+
+export async function updateLogLevel(level: string): Promise<void> {
+  try {
+    await authApi.patch("/users/log-level", { level });
+  } catch (error) {
+    handleApiError(error, "update log level");
+  }
+}
+
+// ============================================================================
+// SESSION TIMEOUT SETTINGS
+// ============================================================================
+
+export async function getSessionTimeout(): Promise<{ timeoutHours: number }> {
+  try {
+    const response = await authApi.get("/users/session-timeout");
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "fetch session timeout");
+  }
+}
+
+export async function updateSessionTimeout(
+  timeoutHours: number,
+): Promise<void> {
+  try {
+    await authApi.patch("/users/session-timeout", { timeoutHours });
+  } catch (error) {
+    handleApiError(error, "update session timeout");
+  }
+}
+
+// ============================================================================
 // GUACAMOLE SETTINGS
 // ============================================================================
 
@@ -2634,20 +2964,22 @@ export async function loginUser(
         window.parent.postMessage(
           {
             type: "AUTH_SUCCESS",
-            token: response.data.token,
             source: "login_api",
             platform: "desktop",
             timestamp: Date.now(),
           },
-          "*",
+          window.location.origin,
         );
       } catch (e) {
         console.error("[main-axios] Error posting message to parent:", e);
       }
     }
 
+    if (response.data.success && !response.data.requires_totp) {
+      markUserAuthenticated();
+    }
+
     return {
-      token: response.data.token || "cookie-based",
       success: response.data.success,
       is_admin: response.data.is_admin,
       username: response.data.username,
@@ -2673,8 +3005,6 @@ export async function logoutUser(): Promise<{
     clearTermixSessionStorage();
 
     if (isElectron()) {
-      localStorage.removeItem("jwt");
-      electronSettingsCache.delete("jwt");
       const electronAPI = (
         window as unknown as {
           electronAPI?: { clearSessionCookies?: () => Promise<void> };
@@ -2684,8 +3014,8 @@ export async function logoutUser(): Promise<{
     } else {
       const isSecure = window.location.protocol === "https:";
       const cookieString = isSecure
-        ? "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; Secure; SameSite=Strict"
-        : "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict";
+        ? "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; Secure; SameSite=Lax"
+        : "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Lax";
       document.cookie = cookieString;
     }
 
@@ -2694,8 +3024,6 @@ export async function logoutUser(): Promise<{
     clearTermixSessionStorage();
 
     if (isElectron()) {
-      localStorage.removeItem("jwt");
-      electronSettingsCache.delete("jwt");
       const electronAPI = (
         window as unknown as {
           electronAPI?: { clearSessionCookies?: () => Promise<void> };
@@ -2705,8 +3033,8 @@ export async function logoutUser(): Promise<{
     } else {
       const isSecure = window.location.protocol === "https:";
       const cookieString = isSecure
-        ? "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; Secure; SameSite=Strict"
-        : "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict";
+        ? "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; Secure; SameSite=Lax"
+        : "jwt=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Lax";
       document.cookie = cookieString;
     }
     handleApiError(error, "logout user");
@@ -2716,9 +3044,19 @@ export async function logoutUser(): Promise<{
 export async function getUserInfo(): Promise<UserInfo> {
   try {
     const response = await authApi.get("/users/me");
+    markUserAuthenticated();
     return response.data;
   } catch (error) {
     handleApiError(error, "fetch user info");
+  }
+}
+
+export async function getCurrentToken(): Promise<string | null> {
+  try {
+    const response = await authApi.get("/users/me/token");
+    return response.data?.token ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -2882,8 +3220,8 @@ export async function getSessions(): Promise<{
     createdAt: string;
     expiresAt: string;
     lastActiveAt: string;
-    jwtToken: string;
     isRevoked?: boolean;
+    isCurrentSession?: boolean;
   }[];
 }> {
   try {
@@ -2919,11 +3257,64 @@ export async function revokeAllUserSessions(
   }
 }
 
+export interface ApiKey {
+  id: string;
+  name: string;
+  userId: string;
+  username: string | null;
+  tokenPrefix: string;
+  createdAt: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  isActive: boolean;
+}
+
+export interface CreatedApiKey extends ApiKey {
+  token: string;
+}
+
+export async function createApiKey(
+  name: string,
+  userId: string,
+  expiresAt?: string,
+): Promise<CreatedApiKey> {
+  try {
+    const response = await authApi.post("/users/api-keys", {
+      name,
+      userId,
+      expiresAt: expiresAt ?? null,
+    });
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "create API key");
+  }
+}
+
+export async function getApiKeys(): Promise<{ apiKeys: ApiKey[] }> {
+  try {
+    const response = await authApi.get("/users/api-keys");
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "fetch API keys");
+  }
+}
+
+export async function deleteApiKey(
+  keyId: string,
+): Promise<{ success: boolean }> {
+  try {
+    const response = await authApi.delete(`/users/api-keys/${keyId}`);
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "delete API key");
+  }
+}
+
 export async function makeUserAdmin(
-  username: string,
+  userId: string,
 ): Promise<Record<string, unknown>> {
   try {
-    const response = await authApi.post("/users/make-admin", { username });
+    const response = await authApi.post("/users/make-admin", { userId });
     return response.data;
   } catch (error) {
     handleApiError(error, "make user admin");
@@ -2931,10 +3322,10 @@ export async function makeUserAdmin(
 }
 
 export async function removeAdminStatus(
-  username: string,
+  userId: string,
 ): Promise<Record<string, unknown>> {
   try {
-    const response = await authApi.post("/users/remove-admin", { username });
+    const response = await authApi.post("/users/remove-admin", { userId });
     return response.data;
   } catch (error) {
     handleApiError(error, "remove admin status");
@@ -3106,16 +3497,19 @@ export async function verifyTOTPLogin(
         window.parent.postMessage(
           {
             type: "AUTH_SUCCESS",
-            token: response.data.token,
             source: "totp_verify",
             platform: "desktop",
             timestamp: Date.now(),
           },
-          "*",
+          window.location.origin,
         );
       } catch (e) {
         console.error("[main-axios] Error posting message to parent:", e);
       }
+    }
+
+    if (response.data.success) {
+      markUserAuthenticated();
     }
 
     return response.data;
@@ -3149,6 +3543,7 @@ export async function getUserAlerts(): Promise<{
     return response.data;
   } catch (error) {
     handleApiError(error, "fetch user alerts");
+    throw error;
   }
 }
 
@@ -3160,6 +3555,7 @@ export async function dismissAlert(
     return response.data;
   } catch (error) {
     handleApiError(error, "dismiss alert");
+    throw error;
   }
 }
 
@@ -3178,9 +3574,13 @@ export async function getReleasesRSS(
   }
 }
 
-export async function getVersionInfo(): Promise<Record<string, unknown>> {
+export async function getVersionInfo(
+  checkRemote = true,
+): Promise<Record<string, unknown>> {
   try {
-    const response = await authApi.get("/version");
+    const response = await authApi.get(
+      `/version${checkRemote ? "" : "?checkRemote=false"}`,
+    );
     return response.data;
   } catch (error) {
     handleApiError(error, "fetch version info");
@@ -3291,6 +3691,20 @@ export async function getSSHHostWithCredentials(
     return response.data;
   } catch (error) {
     handleApiError(error, "fetch SSH host with credentials");
+  }
+}
+
+export async function getHostPassword(
+  hostId: number,
+  field: "password" | "sudoPassword" = "password",
+): Promise<string | null> {
+  try {
+    const response = await sshHostApi.get(
+      `/db/host/${hostId}/password?field=${field}`,
+    );
+    return response.data?.value || null;
+  } catch {
+    return null;
   }
 }
 
@@ -3622,9 +4036,30 @@ export async function executeSnippet(
 // MISCELLANEOUS API CALLS
 // ============================================================================
 
+export interface NetworkTopologyNode {
+  data: {
+    id: string;
+    label?: string;
+    ip?: string;
+    status?: string;
+    tags?: string[];
+    parent?: string;
+    color?: string;
+  };
+  position?: { x: number; y: number };
+}
+
+export interface NetworkTopologyEdge {
+  data: {
+    id?: string;
+    source: string;
+    target: string;
+  };
+}
+
 export interface NetworkTopologyData {
-  nodes: any[];
-  edges: any[];
+  nodes: NetworkTopologyNode[];
+  edges: NetworkTopologyEdge[];
 }
 
 export async function getNetworkTopology(): Promise<NetworkTopologyData | null> {
@@ -3716,7 +4151,9 @@ export async function reorderSnippets(
   updates: Array<{ id: number; order: number; folder?: string }>,
 ): Promise<{ success: boolean }> {
   try {
-    const response = await authApi.post("/snippets/reorder", { updates });
+    const response = await authApi.post("/snippets/reorder", {
+      snippets: updates,
+    });
     return response.data;
   } catch (error) {
     throw handleApiError(error, "reorder snippets");
@@ -3973,6 +4410,39 @@ export interface GuacamoleTokenResponse {
   token: string;
 }
 
+type GuacamoleConfigSource = {
+  guacamoleConfig?: string | Record<string, unknown> | null;
+};
+
+export function getGuacamoleDpi(
+  source?: GuacamoleConfigSource,
+): number | undefined {
+  const config = source?.guacamoleConfig;
+  if (!config) return undefined;
+
+  let dpi: unknown;
+  if (typeof config === "string") {
+    try {
+      dpi = JSON.parse(config).dpi;
+    } catch {
+      return undefined;
+    }
+  } else {
+    dpi = config.dpi;
+  }
+
+  const parsedDpi = typeof dpi === "string" ? Number(dpi) : dpi;
+  if (
+    typeof parsedDpi !== "number" ||
+    !Number.isFinite(parsedDpi) ||
+    parsedDpi <= 0
+  ) {
+    return undefined;
+  }
+
+  return Math.trunc(parsedDpi);
+}
+
 function toGuacamoleParams(
   config: GuacamoleTokenRequest["guacamoleConfig"],
 ): Record<string, unknown> {
@@ -4220,6 +4690,75 @@ export async function revokeHostAccess(
 }
 
 // ============================================================================
+// SNIPPET SHARING
+// ============================================================================
+
+export async function shareSnippet(
+  snippetId: number,
+  shareData: {
+    targetType: "user" | "role";
+    targetUserId?: string;
+    targetRoleId?: number;
+    durationHours?: number;
+  },
+): Promise<{ success: boolean }> {
+  try {
+    const response = await rbacApi.post(
+      `/rbac/snippet/${snippetId}/share`,
+      shareData,
+    );
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "share snippet");
+  }
+}
+
+export async function getSnippetAccess(
+  snippetId: number,
+): Promise<{ accessList: AccessRecord[] }> {
+  try {
+    const response = await rbacApi.get(`/rbac/snippet/${snippetId}/access`);
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "fetch snippet access");
+  }
+}
+
+export async function revokeSnippetAccess(
+  snippetId: number,
+  accessId: number,
+): Promise<{ success: boolean }> {
+  try {
+    const response = await rbacApi.delete(
+      `/rbac/snippet/${snippetId}/access/${accessId}`,
+    );
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "revoke snippet access");
+  }
+}
+
+export async function getSharedSnippets(): Promise<{
+  sharedSnippets: Array<{
+    id: number;
+    name: string;
+    content: string;
+    description: string | null;
+    folder: string | null;
+    ownerUsername: string;
+    permissionLevel: string;
+    expiresAt: string | null;
+  }>;
+}> {
+  try {
+    const response = await rbacApi.get("/rbac/shared-snippets");
+    return response.data;
+  } catch (error) {
+    handleApiError(error, "fetch shared snippets");
+  }
+}
+
+// ============================================================================
 // DOCKER MANAGEMENT API
 // ============================================================================
 
@@ -4246,7 +4785,7 @@ export async function connectDockerSession(
   isPassword?: boolean;
   status?: string;
   reason?: string;
-  connectionLogs?: any[];
+  connectionLogs?: ApiConnectionLog[];
   requires_warpgate?: boolean;
   url?: string;
   securityKey?: string;
@@ -4258,24 +4797,36 @@ export async function connectDockerSession(
       ...config,
     });
     return response.data;
-  } catch (error: any) {
-    if (error.response?.data?.status === "auth_required") {
+  } catch (error: unknown) {
+    if (
+      axios.isAxiosError<ConnectErrorResponse>(error) &&
+      error.response?.data?.status === "auth_required"
+    ) {
       return error.response.data;
     }
-    if (error.response?.data?.requires_totp) {
+    if (
+      axios.isAxiosError<ConnectErrorResponse>(error) &&
+      error.response?.data?.requires_totp
+    ) {
       return error.response.data;
     }
-    if (error.response?.data?.requires_warpgate) {
+    if (
+      axios.isAxiosError<ConnectErrorResponse>(error) &&
+      error.response?.data?.requires_warpgate
+    ) {
       return error.response.data;
     }
-    if (error?.response?.data?.connectionLogs) {
+    if (
+      axios.isAxiosError<ConnectErrorResponse>(error) &&
+      error.response?.data?.connectionLogs
+    ) {
+      const data = error.response.data;
       const errorWithLogs = new Error(
-        error?.response?.data?.error ||
-          error?.response?.data?.message ||
-          error.message,
+        data.error || data.message || error.message,
       );
-      (errorWithLogs as any).connectionLogs =
-        error.response.data.connectionLogs;
+      Object.assign(errorWithLogs, {
+        connectionLogs: data.connectionLogs,
+      });
       throw errorWithLogs;
     }
     throw handleApiError(error, "connect to Docker SSH session");

@@ -1,12 +1,8 @@
 import GuacamoleLite from "guacamole-lite";
-import { parse as parseUrl } from "url";
 import { guacLogger } from "../utils/logger.js";
-import { AuthManager } from "../utils/auth-manager.js";
 import { GuacamoleTokenService } from "./token-service.js";
 import { getDb } from "../database/db/index.js";
-import type { IncomingMessage } from "http";
 
-const authManager = AuthManager.getInstance();
 const tokenService = GuacamoleTokenService.getInstance();
 
 function parseGuacUrl(url: string): { host: string; port: number } {
@@ -57,8 +53,8 @@ const clientOptions = {
     },
   },
   allowedUnencryptedConnectionSettings: {
-    rdp: ["width", "height", "dpi"],
-    vnc: ["width", "height", "dpi"],
+    rdp: ["width", "height"],
+    vnc: ["width", "height"],
     telnet: ["width", "height"],
   },
   connectionDefaultSettings: {
@@ -74,6 +70,7 @@ const clientOptions = {
       width: 1280,
       height: 720,
       dpi: 96,
+      audio: ["audio/L16"],
     },
     vnc: {
       "swap-red-blue": false,

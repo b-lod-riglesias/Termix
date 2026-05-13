@@ -8,7 +8,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import type { TabContextTab } from "../../../types/index.js";
+import type { TabContextTab, TerminalRefHandle } from "../../../types/index.js";
 
 export type Tab = TabContextTab;
 export type SplitDirection = "horizontal" | "vertical";
@@ -140,9 +140,15 @@ interface TabContextType {
     },
   ) => void;
   updateTab: (tabId: number, updates: Partial<Omit<Tab, "id">>) => void;
+  previewTerminalTheme: string | null;
+  setPreviewTerminalTheme: (theme: string | null) => void;
 }
 
 const TabContext = createContext<TabContextType | undefined>(undefined);
+
+type ElectronWindow = Window & {
+  electronAPI?: unknown;
+};
 
 export function useTabs() {
   const context = useContext(TabContext);
@@ -373,7 +379,7 @@ export function TabProvider({ children }: TabProviderProps) {
       executeCommand,
       terminalRef:
         tabData.type === "terminal"
-          ? React.createRef<{ disconnect?: () => void }>()
+          ? React.createRef<TerminalRefHandle>()
           : undefined,
       hostConfig: tabData.hostConfig
         ? {
@@ -1067,6 +1073,8 @@ export function TabProvider({ children }: TabProviderProps) {
       reorderTabs,
       updateHostConfig,
       updateTab,
+      previewTerminalTheme,
+      setPreviewTerminalTheme,
     }),
     [
       tabs,

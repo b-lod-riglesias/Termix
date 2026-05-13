@@ -1,6 +1,7 @@
 import React from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { useTranslation } from "react-i18next";
+import { getHostPassword } from "@/ui/main-axios.ts";
 import { cn } from "@/lib/utils";
 import {
   Home,
@@ -9,6 +10,7 @@ import {
   Terminal as TerminalIcon,
   Server as ServerIcon,
   Folder as FolderIcon,
+  FolderOpen,
   User as UserIcon,
   Monitor as MonitorIcon,
   Eye as EyeIcon,
@@ -18,6 +20,7 @@ import {
   Container as DockerIcon,
   Key,
 } from "lucide-react";
+import { toast } from "sonner";
 import type { SSHHost } from "@/types";
 
 interface TabProps {
@@ -38,6 +41,7 @@ interface TabProps {
   isValidDropTarget?: boolean;
   isHoveredDropTarget?: boolean;
   hostConfig?: SSHHost;
+  onOpenFileManager?: () => void;
 }
 
 export function Tab({
@@ -58,6 +62,7 @@ export function Tab({
   isValidDropTarget = false,
   isHoveredDropTarget = false,
   hostConfig,
+  onOpenFileManager,
 }: TabProps): React.ReactElement {
   const { t } = useTranslation();
 
@@ -66,42 +71,59 @@ export function Tab({
 
     if (!hostConfig) return;
 
-    const hasSshPassword =
-      hostConfig.authType === "password" && hostConfig.password;
-    const hasSudoPassword = hostConfig.sudoPassword;
+    const hasSshPw =
+      hostConfig.authType === "password" &&
+      (hostConfig.hasPassword || hostConfig.password);
+    const hasSudoPw = hostConfig.hasSudoPassword || hostConfig.sudoPassword;
 
-    if (!hasSshPassword && !hasSudoPassword) {
+    if (!hasSshPw && !hasSudoPw) return;
+
+    const field = hasSshPw ? "password" : "sudoPassword";
+    const passwordToCopy = await getHostPassword(hostConfig.id, field);
+
+    if (!passwordToCopy) {
+      toast.error(t("nav.failedToCopyPassword"));
       return;
     }
 
     try {
-      let passwordToCopy = "";
-
-      if (hasSshPassword) {
-        passwordToCopy = hostConfig.password || "";
-      } else if (hasSudoPassword) {
-        passwordToCopy = hostConfig.sudoPassword;
-      }
-
       await navigator.clipboard.writeText(passwordToCopy);
-    } catch {}
+      toast.success(t("nav.passwordCopied"));
+    } catch {
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = passwordToCopy;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        toast.success(t("nav.passwordCopied"));
+      } catch {
+        toast.error(t("nav.failedToCopyPassword"));
+      }
+    }
   };
 
   const hasPassword =
     hostConfig &&
-    ((hostConfig.authType === "password" && hostConfig.password) ||
+    ((hostConfig.authType === "password" &&
+      (hostConfig.hasPassword || hostConfig.password)) ||
+      hostConfig.hasSudoPassword ||
       hostConfig.sudoPassword);
 
   const getPasswordButtonTitle = () => {
     if (!hostConfig) return "";
 
-    const hasSshPassword =
-      hostConfig.authType === "password" && hostConfig.password;
-    const hasSudoPassword = hostConfig.sudoPassword;
+    const hasSshPw =
+      hostConfig.authType === "password" &&
+      (hostConfig.hasPassword || hostConfig.password);
+    const hasSudoPw = hostConfig.hasSudoPassword || hostConfig.sudoPassword;
 
-    if (hasSshPassword) {
+    if (hasSshPw) {
       return t("nav.copyPassword");
-    } else if (hasSudoPassword) {
+    } else if (hasSudoPw) {
       return t("nav.copySudoPassword");
     }
     return t("nav.noPasswordAvailable");
@@ -248,6 +270,21 @@ export function Tab({
             title={getPasswordButtonTitle()}
           >
             <Key className="h-4 w-4 text-muted-foreground" />
+          </Button>
+        )}
+
+        {tabType === "terminal" && onOpenFileManager && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenFileManager();
+            }}
+            title={t("nav.openFileManager")}
+          >
+            <FolderOpen className="h-4 w-4 text-muted-foreground" />
           </Button>
         )}
 

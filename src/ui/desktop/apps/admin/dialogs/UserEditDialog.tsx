@@ -5,7 +5,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from "@/components/ui/dialog.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import { Label } from "@/components/ui/label.tsx";
@@ -20,7 +19,6 @@ import {
   Plus,
   AlertCircle,
   Shield,
-  Key,
   Clock,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -32,7 +30,6 @@ import {
   removeRoleFromUser,
   makeUserAdmin,
   removeAdminStatus,
-  initiatePasswordReset,
   revokeAllUserSessions,
   deleteUser,
   type UserRole,
@@ -42,9 +39,9 @@ import {
 interface User {
   id: string;
   username: string;
-  is_admin: boolean;
-  is_oidc: boolean;
-  password_hash?: string;
+  isAdmin: boolean;
+  isOidc: boolean;
+  passwordHash?: string;
 }
 
 interface UserEditDialogProps {
@@ -53,7 +50,6 @@ interface UserEditDialogProps {
   user: User | null;
   currentUser: { id: string; username: string } | null;
   onSuccess: () => void;
-  allowPasswordLogin: boolean;
 }
 
 export function UserEditDialog({
@@ -62,13 +58,11 @@ export function UserEditDialog({
   user,
   currentUser,
   onSuccess,
-  allowPasswordLogin,
 }: UserEditDialogProps) {
   const { t } = useTranslation();
   const { confirmWithToast } = useConfirmation();
 
   const [adminLoading, setAdminLoading] = useState(false);
-  const [passwordResetLoading, setPasswordResetLoading] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [rolesLoading, setRolesLoading] = useState(false);
@@ -81,7 +75,7 @@ export function UserEditDialog({
 
   useEffect(() => {
     if (open && user) {
-      setIsAdmin(user.is_admin);
+      setIsAdmin(user.isAdmin);
       loadRoles();
     }
   }, [open, user]);
@@ -135,19 +129,18 @@ export function UserEditDialog({
     setAdminLoading(true);
     try {
       if (checked) {
-        await makeUserAdmin(userToUpdate.username);
+        await makeUserAdmin(userToUpdate.id);
         toast.success(
           t("admin.userIsNowAdmin", { username: userToUpdate.username }),
         );
       } else {
-        await removeAdminStatus(userToUpdate.username);
+        await removeAdminStatus(userToUpdate.id);
         toast.success(
           t("admin.adminStatusRemoved", { username: userToUpdate.username }),
         );
       }
       setIsAdmin(checked);
       onSuccess();
-      onOpenChange(true);
     } catch (error) {
       console.error("Failed to toggle admin status:", error);
       toast.error(
@@ -158,42 +151,6 @@ export function UserEditDialog({
       onOpenChange(true);
     } finally {
       setAdminLoading(false);
-    }
-  };
-
-  const handlePasswordReset = async () => {
-    if (!user) return;
-
-    const userToReset = user;
-    onOpenChange(false);
-
-    const confirmed = await confirmWithToast({
-      title: t("admin.resetUserPassword"),
-      description: `${t("admin.passwordResetWarning")} (${userToReset.username})`,
-      confirmText: t("admin.resetUserPassword"),
-      cancelText: t("common.cancel"),
-      variant: "destructive",
-    });
-
-    if (!confirmed) {
-      onOpenChange(true);
-      return;
-    }
-
-    setPasswordResetLoading(true);
-    try {
-      await initiatePasswordReset(userToReset.username);
-      toast.success(
-        t("admin.passwordResetInitiated", { username: userToReset.username }),
-      );
-      onSuccess();
-      onOpenChange(true);
-    } catch (error) {
-      console.error("Failed to reset password:", error);
-      toast.error(t("admin.failedToResetPassword"));
-      onOpenChange(true);
-    } finally {
-      setPasswordResetLoading(false);
     }
   };
 
@@ -332,9 +289,9 @@ export function UserEditDialog({
 
   const getAuthTypeDisplay = (): string => {
     if (!user) return "";
-    if (user.is_oidc && user.password_hash) {
+    if (user.isOidc && user.passwordHash) {
       return t("admin.dualAuth");
-    } else if (user.is_oidc) {
+    } else if (user.isOidc) {
       return t("admin.externalOIDC");
     } else {
       return t("admin.localPassword");
@@ -342,9 +299,6 @@ export function UserEditDialog({
   };
 
   if (!user) return null;
-
-  const showPasswordReset =
-    allowPasswordLogin && (user.password_hash || !user.is_oidc);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

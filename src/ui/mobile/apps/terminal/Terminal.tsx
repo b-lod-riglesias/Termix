@@ -30,6 +30,7 @@ import {
 import type { TerminalConfig } from "@/types";
 import { TOTPDialog } from "@/ui/desktop/navigation/dialogs/TOTPDialog.tsx";
 import { SSHAuthDialog } from "@/ui/desktop/navigation/dialogs/SSHAuthDialog.tsx";
+import { PassphraseDialog } from "@/ui/desktop/navigation/dialogs/PassphraseDialog.tsx";
 import { WarpgateDialog } from "@/ui/desktop/navigation/dialogs/WarpgateDialog.tsx";
 import {
   ConnectionLogProvider,
@@ -99,7 +100,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
     const resizeTimeout = useRef<NodeJS.Timeout | null>(null);
     const wasDisconnectedBySSH = useRef(false);
     const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const [visible, setVisible] = useState(false);
+    const [, setVisible] = useState(false);
     const [isReady, setIsReady] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
     const [isConnecting, setIsConnecting] = useState(false);
@@ -119,6 +120,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
     const [authDialogReason, setAuthDialogReason] = useState<
       "no_keyboard" | "auth_failed" | "timeout"
     >("no_keyboard");
+    const [showPassphraseDialog, setShowPassphraseDialog] = useState(false);
     const [warpgateAuthRequired, setWarpgateAuthRequired] = useState(false);
     const [warpgateAuthUrl, setWarpgateAuthUrl] = useState<string>("");
     const [warpgateSecurityKey, setWarpgateSecurityKey] = useState<string>("");
@@ -127,7 +129,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
     const isFittingRef = useRef(false);
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const reconnectAttempts = useRef(0);
-    const maxReconnectAttempts = 3;
+    const maxReconnectAttempts = 8;
     const isUnmountingRef = useRef(false);
     const shouldNotReconnectRef = useRef(false);
     const isReconnectingRef = useRef(false);
@@ -158,12 +160,9 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
 
     useEffect(() => {
       const checkAuth = () => {
-        const jwtToken = getCookie("jwt");
-        const isAuth = !!(jwtToken && jwtToken.trim() !== "");
-
         setIsAuthenticated((prev) => {
-          if (prev !== isAuth) {
-            return isAuth;
+          if (!prev) {
+            return true;
           }
           return prev;
         });
@@ -333,6 +332,32 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
       webSocketRef.current?.close();
     }
 
+    function handlePassphraseSubmit(passphrase: string) {
+      if (webSocketRef.current && terminal) {
+        webSocketRef.current.send(
+          JSON.stringify({
+            type: "reconnect_with_credentials",
+            data: {
+              cols: terminal.cols,
+              rows: terminal.rows,
+              keyPassword: passphrase,
+              hostConfig: {
+                ...hostConfig,
+                keyPassword: passphrase,
+              },
+            },
+          }),
+        );
+        setShowPassphraseDialog(false);
+        setIsConnecting(true);
+      }
+    }
+
+    function handlePassphraseCancel() {
+      setShowPassphraseDialog(false);
+      webSocketRef.current?.close();
+    }
+
     useImperativeHandle(
       ref,
       () => ({
@@ -452,21 +477,6 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           return;
         }
 
-        const jwtToken = getCookie("jwt");
-        if (!jwtToken || jwtToken.trim() === "") {
-          console.warn("Reconnection cancelled - no authentication token");
-          isReconnectingRef.current = false;
-          updateConnectionError(t("terminal.authenticationRequired"));
-          setIsConnecting(false);
-          shouldNotReconnectRef.current = true;
-          addLog({
-            type: "error",
-            stage: "auth",
-            message: t("terminal.authenticationRequired"),
-          });
-          return;
-        }
-
         if (terminal && hostConfig) {
           terminal.clear();
           const cols = terminal.cols;
@@ -539,9 +549,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
         connectionTimeoutRef.current = null;
       }
 
-      const wsUrl = `${baseWsUrl}?token=${encodeURIComponent(jwtToken)}`;
-
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(baseWsUrl);
       webSocketRef.current = ws;
       wasDisconnectedBySSH.current = false;
       updateConnectionError(null);
@@ -715,7 +723,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
                     ws.send(
                       JSON.stringify({
                         type: "input",
-                        data: snippet.content + "\n",
+                        data: snippet.content + "\r",
                       }),
                     );
                   }
@@ -733,6 +741,13 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
                 );
               }
             }, 100);
+          } else if (msg.type === "session_ended") {
+            wasDisconnectedBySSH.current = true;
+            shouldNotReconnectRef.current = true;
+            isConnectingRef.current = false;
+            setIsConnected(false);
+            setIsConnecting(false);
+            updateConnectionError(t("terminal.sessionEnded"));
           } else if (msg.type === "disconnected") {
             wasDisconnectedBySSH.current = true;
             isConnectingRef.current = false;
@@ -806,6 +821,53 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
               clearTimeout(connectionTimeoutRef.current);
               connectionTimeoutRef.current = null;
             }
+          } else if (msg.type === "passphrase_required") {
+            setShowPassphraseDialog(true);
+            setIsConnecting(false);
+            if (connectionTimeoutRef.current) {
+              clearTimeout(connectionTimeoutRef.current);
+              connectionTimeoutRef.current = null;
+            }
+          } else if (msg.type === "tmux_sessions_available") {
+            // On mobile, auto-attach to the first available session
+            const sessions = msg.sessions as Array<{ name: string }>;
+            if (sessions.length > 0 && ws.readyState === 1) {
+              ws.send(
+                JSON.stringify({
+                  type: "tmux_attach",
+                  data: { sessionName: sessions[0].name },
+                }),
+              );
+            }
+          } else if (
+            msg.type === "tmux_session_created" ||
+            msg.type === "tmux_session_attached"
+          ) {
+            const sessionName =
+              typeof msg.sessionName === "string" ? msg.sessionName : "";
+            addLog({
+              type: "info",
+              stage: "connection",
+              message:
+                msg.type === "tmux_session_created"
+                  ? t("terminal.tmuxSessionCreated", {
+                      name: sessionName || "new",
+                    })
+                  : t("terminal.tmuxSessionAttached", {
+                      name: sessionName,
+                    }),
+            });
+          } else if (msg.type === "tmux_unavailable") {
+            setTimeout(() => {
+              toast.warning(t("terminal.tmuxUnavailable"), {
+                duration: 8000,
+              });
+            }, 500);
+            addLog({
+              type: "warning",
+              stage: "connection",
+              message: t("terminal.tmuxUnavailable"),
+            });
           } else if (msg.type === "connection_log") {
             if (msg.data) {
               addLog({
@@ -840,17 +902,21 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
         }
 
         if (event.code === 1006) {
-          console.error(
-            "[WebSocket] Abnormal closure detected - possible HTTPS/proxy issue",
+          console.warn(
+            "[WebSocket] Abnormal closure detected - attempting reconnection",
           );
           addLog({
-            type: "error",
+            type: "warning",
             stage: "connection",
             message: t("terminal.websocketAbnormalClose"),
           });
-          updateConnectionError(t("terminal.websocketAbnormalClose"));
-          setIsConnecting(false);
-          shouldNotReconnectRef.current = true;
+
+          if (wasConnectedRef.current) {
+            attemptReconnection();
+          } else {
+            updateConnectionError(t("terminal.websocketAbnormalClose"));
+            setIsConnecting(false);
+          }
           return;
         }
 
@@ -864,12 +930,6 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           updateConnectionError("Authentication failed - please re-login");
           setIsConnecting(false);
           shouldNotReconnectRef.current = true;
-
-          localStorage.removeItem("jwt");
-
-          setTimeout(() => {
-            window.location.reload();
-          }, 1000);
 
           return;
         }
@@ -1001,6 +1061,16 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
 
       terminal.open(xtermRef.current);
 
+      const handlePaste = (e: ClipboardEvent) => {
+        const text = e.clipboardData?.getData("text");
+        if (text) {
+          e.preventDefault();
+          e.stopPropagation();
+          terminal.paste(text);
+        }
+      };
+      xtermRef.current.addEventListener("paste", handlePaste);
+
       const resizeObserver = new ResizeObserver(() => {
         if (resizeTimeout.current) clearTimeout(resizeTimeout.current);
         resizeTimeout.current = setTimeout(() => {
@@ -1025,16 +1095,6 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           }
           hardRefresh();
 
-          const jwtToken = getCookie("jwt");
-          if (!jwtToken || jwtToken.trim() === "") {
-            setIsConnected(false);
-            setIsConnecting(false);
-            updateConnectionError("Authentication required");
-            setVisible(true);
-            setIsReady(true);
-            return;
-          }
-
           const cols = terminal.cols;
           const rows = terminal.rows;
 
@@ -1053,9 +1113,12 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
         });
       });
 
+      const currentElement = xtermRef.current;
+
       return () => {
         resizeObserver.disconnect();
         clipboardProvider.dispose();
+        currentElement?.removeEventListener("paste", handlePaste);
         if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current);
         if (resizeTimeout.current) clearTimeout(resizeTimeout.current);
         if (pingIntervalRef.current) {
@@ -1141,6 +1204,19 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           reason={authDialogReason}
           onSubmit={handleAuthDialogSubmit}
           onCancel={handleAuthDialogCancel}
+          hostInfo={{
+            ip: hostConfig.ip,
+            port: hostConfig.port,
+            username: hostConfig.username,
+            name: hostConfig.name,
+          }}
+          backgroundColor={backgroundColor}
+        />
+
+        <PassphraseDialog
+          isOpen={showPassphraseDialog}
+          onSubmit={handlePassphraseSubmit}
+          onCancel={handlePassphraseCancel}
           hostInfo={{
             ip: hostConfig.ip,
             port: hostConfig.port,
