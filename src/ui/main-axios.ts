@@ -678,13 +678,19 @@ function isDev(): boolean {
     return false;
   }
 
+  return process.env.NODE_ENV === "development" && shouldUseDirectApiPorts();
+}
+
+function shouldUseDirectApiPorts(): boolean {
+  if (isElectron()) {
+    return false;
+  }
+
   return (
-    process.env.NODE_ENV === "development" &&
-    (window.location.port === "3000" ||
-      window.location.port === "5173" ||
-      window.location.port === "" ||
-      window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1")
+    window.location.port === "3000" ||
+    window.location.port === "5173" ||
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1"
   );
 }
 
@@ -871,6 +877,7 @@ export function setEmbeddedMode(value: boolean): void {
 function getApiUrl(path: string, defaultPort: number): string {
   const devMode = isDev();
   const electronMode = isElectron();
+  const directApiPorts = shouldUseDirectApiPorts();
 
   if (electronMode) {
     if (embeddedMode && !configuredServerUrl) {
@@ -881,7 +888,7 @@ function getApiUrl(path: string, defaultPort: number): string {
     }
     console.warn("Electron mode but no server configured!");
     return "http://no-server-configured";
-  } else if (devMode) {
+  } else if (devMode || directApiPorts) {
     if (shouldUseReverseProxyPaths()) {
       return `${getBasePath()}/api${path}`;
     }

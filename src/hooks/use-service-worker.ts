@@ -1,6 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { isElectron } from "@/lib/electron";
-import { getBasePath } from "@/lib/base-path";
 
 interface ServiceWorkerState {
   isSupported: boolean;
@@ -15,80 +14,30 @@ export function useServiceWorker(): ServiceWorkerState {
     updateAvailable: false,
   });
 
-  const handleUpdateFound = useCallback(
-    (registration: ServiceWorkerRegistration) => {
-      const newWorker = registration.installing;
-      if (!newWorker) return;
-
-      newWorker.addEventListener("statechange", () => {
-        if (
-          newWorker.state === "installed" &&
-          navigator.serviceWorker.controller
-        ) {
-          setState((prev) => ({ ...prev, updateAvailable: true }));
-        }
-      });
-    },
-    [],
-  );
-
   useEffect(() => {
     const isSupported =
       "serviceWorker" in navigator && !isElectron() && import.meta.env.PROD;
 
-    setState((prev) => ({ ...prev, isSupported }));
-
-    if (!isSupported) return;
-
-    const shouldReloadOnControllerChange = Boolean(
-      navigator.serviceWorker.controller,
-    );
-    let hasReloadedForUpdate = false;
-    const handleControllerChange = () => {
-      if (!shouldReloadOnControllerChange || hasReloadedForUpdate) {
-        return;
-      }
-
-      hasReloadedForUpdate = true;
-      window.location.reload();
-    };
-
-    const registerSW = async () => {
+    const clearExistingServiceWorkers = async () => {
+      if (!isSupported) return;
       try {
-        const registration = await navigator.serviceWorker.register(
-          `${getBasePath()}/sw.js`,
-          { updateViaCache: "none" },
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(
+          registrations.map((registration) => registration.unregister()),
         );
-        setState((prev) => ({ ...prev, isRegistered: true }));
 
-        registration.addEventListener("updatefound", () =>
-          handleUpdateFound(registration),
-        );
-        await registration.update();
+        if ("caches" in window) {
+          const cacheNames = await caches.keys();
+          await Promise.all(cacheNames.map((name) => caches.delete(name)));
+        }
       } catch (error) {
-        console.error("[SW] Registration failed:", error);
+        console.error("[SW] Cleanup failed:", error);
       }
     };
 
-    navigator.serviceWorker.addEventListener(
-      "controllerchange",
-      handleControllerChange,
-    );
-
-    if (document.readyState === "complete") {
-      registerSW();
-    } else {
-      window.addEventListener("load", registerSW);
-    }
-
-    return () => {
-      window.removeEventListener("load", registerSW);
-      navigator.serviceWorker.removeEventListener(
-        "controllerchange",
-        handleControllerChange,
-      );
-    };
-  }, [handleUpdateFound]);
+    void clearExistingServiceWorkers();
+    setState({ isSupported: false, isRegistered: false, updateAvailable: false });
+  }, []);
 
   return state;
 }
