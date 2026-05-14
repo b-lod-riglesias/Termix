@@ -1,5 +1,5 @@
 {
-  "id": "/",
+  "id": "https://termix.cpd.local/",
   "name": "Termix",
   "short_name": "Termix",
   "description": "A web-based server management platform with SSH terminal, tunneling, and file editing capabilities",
@@ -7,8 +7,8 @@
   "background_color": "#09090b",
   "display": "standalone",
   "orientation": "any",
-  "scope": "./",
-  "start_url": "./",
+  "scope": "/",
+  "start_url": "/",
   "icons": [
     {
       "src": "./icons/48x48.png",

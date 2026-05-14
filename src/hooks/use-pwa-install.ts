@@ -17,6 +17,7 @@ interface PwaInstallState {
   isSecureContext: boolean;
   browserName: string;
   installHelp: string;
+  installUrl: string;
   install: () => Promise<InstallOutcome>;
 }
 
@@ -120,6 +121,7 @@ export function usePwaInstall(): PwaInstallState {
     isSecureContext: window.isSecureContext,
     browserName,
     installHelp: getInstallHelp(Boolean(installPrompt)),
+    installUrl: "https://termix.cpd.local/",
     install,
   };
 }

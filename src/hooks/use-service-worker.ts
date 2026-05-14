@@ -18,6 +18,7 @@ export function useServiceWorker(): ServiceWorkerState {
   useEffect(() => {
     const isSupported =
       "serviceWorker" in navigator && !isElectron() && import.meta.env.PROD;
+    const reloadKey = "termix_sw_ready_reloaded";
 
     setState((prev) => ({ ...prev, isSupported }));
 
@@ -35,6 +36,14 @@ export function useServiceWorker(): ServiceWorkerState {
           isRegistered: true,
           updateAvailable: false,
         });
+
+        if (!navigator.serviceWorker.controller) {
+          await navigator.serviceWorker.ready;
+          if (sessionStorage.getItem(reloadKey) !== "true") {
+            sessionStorage.setItem(reloadKey, "true");
+            window.location.reload();
+          }
+        }
       } catch (error) {
         console.error("[SW] Registration failed:", error);
         setState({
