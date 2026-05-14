@@ -182,12 +182,12 @@ function RootApp() {
   );
 }
 
-prepareClientCacheVersion().finally(() => {
-  createRoot(document.getElementById("root")!).render(
-    <StrictMode>
-      <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
-        <RootApp />
-      </ThemeProvider>
-    </StrictMode>,
-  );
-});
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
+      <RootApp />
+    </ThemeProvider>
+  </StrictMode>,
+);
+
+void prepareClientCacheVersion();

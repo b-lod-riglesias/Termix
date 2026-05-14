@@ -269,6 +269,9 @@ export function TabProvider({ children }: TabProviderProps) {
   const [recentTerminalTabs, setRecentTerminalTabs] = useState<
     Array<{ title: string; hostConfig: any }>
   >([]);
+  const [previewTerminalTheme, setPreviewTerminalTheme] = useState<string | null>(
+    null,
+  );
   const nextTabId = useRef(2);
   const hasHydratedStateRef = useRef(false);
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1085,6 +1088,7 @@ export function TabProvider({ children }: TabProviderProps) {
       splitPanelSizes,
       focusedSplitTabId,
       recentTerminalTabs,
+      previewTerminalTheme,
     ],
   );
 
