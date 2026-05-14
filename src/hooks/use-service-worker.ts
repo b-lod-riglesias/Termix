@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { isElectron } from "@/lib/electron";
+import { getBasePath } from "@/lib/base-path";
 
 interface ServiceWorkerState {
   isSupported: boolean;
@@ -18,25 +19,41 @@ export function useServiceWorker(): ServiceWorkerState {
     const isSupported =
       "serviceWorker" in navigator && !isElectron() && import.meta.env.PROD;
 
-    const clearExistingServiceWorkers = async () => {
+    setState((prev) => ({ ...prev, isSupported }));
+
+    const registerServiceWorker = async () => {
       if (!isSupported) return;
       try {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        await Promise.all(
-          registrations.map((registration) => registration.unregister()),
+        const registration = await navigator.serviceWorker.register(
+          `${getBasePath()}/sw.js`,
+          { updateViaCache: "none" },
         );
+        await registration.update();
 
-        if ("caches" in window) {
-          const cacheNames = await caches.keys();
-          await Promise.all(cacheNames.map((name) => caches.delete(name)));
-        }
+        setState({
+          isSupported: true,
+          isRegistered: true,
+          updateAvailable: false,
+        });
       } catch (error) {
-        console.error("[SW] Cleanup failed:", error);
+        console.error("[SW] Registration failed:", error);
+        setState({
+          isSupported: true,
+          isRegistered: false,
+          updateAvailable: false,
+        });
       }
     };
 
-    void clearExistingServiceWorkers();
-    setState({ isSupported: false, isRegistered: false, updateAvailable: false });
+    if (document.readyState === "complete") {
+      void registerServiceWorker();
+    } else {
+      window.addEventListener("load", registerServiceWorker);
+    }
+
+    return () => {
+      window.removeEventListener("load", registerServiceWorker);
+    };
   }, []);
 
   return state;

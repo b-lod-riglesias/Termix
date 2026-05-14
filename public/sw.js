@@ -1,4 +1,4 @@
-const CACHE_NAME = "termix-static-v2";
+const CACHE_NAME = "termix-static-v3";
 const STATIC_ASSETS = [
   "/favicon.ico",
   "/icons/48x48.png",
