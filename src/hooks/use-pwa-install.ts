@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 
 type PwaPromptOutcome = "accepted" | "dismissed";
+type InstallOutcome =
+  | PwaPromptOutcome
+  | "unavailable"
+  | "installed";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -10,7 +14,10 @@ interface BeforeInstallPromptEvent extends Event {
 interface PwaInstallState {
   canInstall: boolean;
   isInstalled: boolean;
-  install: () => Promise<PwaPromptOutcome | "unavailable" | "installed">;
+  isSecureContext: boolean;
+  browserName: string;
+  installHelp: string;
+  install: () => Promise<InstallOutcome>;
 }
 
 function isStandalone(): boolean {
@@ -21,13 +28,56 @@ function isStandalone(): boolean {
   );
 }
 
+function getBrowserName(): string {
+  const userAgent = navigator.userAgent;
+  if (/Edg\//.test(userAgent)) return "Edge";
+  if (/Brave\//.test(userAgent)) return "Brave";
+  if (/Chrome\//.test(userAgent) || /Chromium\//.test(userAgent)) {
+    return "Chrome/Chromium";
+  }
+  return "este navegador";
+}
+
+function getInstallHelp(canInstall: boolean): string {
+  if (isStandalone()) return "Termix ya esta abierto como aplicacion.";
+
+  if (!window.isSecureContext) {
+    return [
+      "Chrome, Edge y Brave solo permiten instalar una PWA desde HTTPS o localhost.",
+      "Con http://10.20.20.50:5173 el navegador bloquea el instalador.",
+      "Entra por https://termix.cpd.local/ con un certificado aceptado y vuelve a pulsar Instalar Termix.",
+    ].join(" ");
+  }
+
+  if (canInstall) {
+    return "Pulsa Instalar Termix para abrir el instalador nativo del navegador.";
+  }
+
+  return [
+    "El navegador aun no ha habilitado el instalador.",
+    "Recarga la pagina una vez y abre Tools > Instalar aplicacion.",
+    "Si sigue sin aparecer, usa el menu del navegador: Chrome/Brave > Guardar y compartir > Instalar pagina como aplicacion; Edge > Aplicaciones > Instalar este sitio como una aplicacion.",
+  ].join(" ");
+}
+
 export function usePwaInstall(): PwaInstallState {
   const [installPrompt, setInstallPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
+  const [browserName, setBrowserName] = useState("este navegador");
 
   useEffect(() => {
     setIsInstalled(isStandalone());
+    setBrowserName(getBrowserName());
+
+    void (async () => {
+      const maybeBrave = navigator as Navigator & {
+        brave?: { isBrave?: () => Promise<boolean> };
+      };
+      if (await maybeBrave.brave?.isBrave?.()) {
+        setBrowserName("Brave");
+      }
+    })();
 
     const handleBeforeInstallPrompt = (event: Event) => {
       event.preventDefault();
@@ -67,6 +117,9 @@ export function usePwaInstall(): PwaInstallState {
   return {
     canInstall: Boolean(installPrompt),
     isInstalled,
+    isSecureContext: window.isSecureContext,
+    browserName,
+    installHelp: getInstallHelp(Boolean(installPrompt)),
     install,
   };
 }

@@ -182,6 +182,9 @@ export function SSHToolsSidebar({
   const {
     canInstall: canInstallApp,
     isInstalled: isAppInstalled,
+    isSecureContext: isPwaSecureContext,
+    browserName: pwaBrowserName,
+    installHelp: pwaInstallHelp,
     install: installApp,
   } = usePwaInstall();
   const { confirmWithToast } = useConfirmation();
@@ -1262,9 +1265,12 @@ export function SSHToolsSidebar({
       return;
     }
 
-    toast.info(
-      "Si el navegador no muestra el instalador, usa el icono de instalar en la barra de direcciones o el menu del navegador.",
-    );
+    if (!isPwaSecureContext) {
+      toast.error(pwaInstallHelp, { duration: 12000 });
+      return;
+    }
+
+    toast.info(pwaInstallHelp, { duration: 12000 });
   };
 
   return (
@@ -1427,6 +1433,17 @@ export function SSHToolsSidebar({
                       <p className="text-xs text-muted-foreground">
                         Crea un acceso directo tipo app, como ChatGPT. No
                         instala un programa nuevo ni cambia tus datos.
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Navegador detectado: {pwaBrowserName}. Estado:{" "}
+                        {isAppInstalled
+                          ? "ya instalada"
+                          : canInstallApp
+                            ? "lista para instalar"
+                            : isPwaSecureContext
+                              ? "esperando al navegador"
+                              : "requiere HTTPS"}
+                        .
                       </p>
                       <Button
                         type="button"
