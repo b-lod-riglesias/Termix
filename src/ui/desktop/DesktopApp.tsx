@@ -23,6 +23,7 @@ import {
   getUserInfo,
   logoutUser,
   isCurrentAuthInvalidationError,
+  isElectron,
 } from "@/ui/main-axios.ts";
 import { useTheme } from "@/components/theme-provider";
 import { dbHealthMonitor } from "@/lib/db-health-monitor.ts";
