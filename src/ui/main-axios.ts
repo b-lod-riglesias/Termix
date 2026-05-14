@@ -2667,9 +2667,23 @@ export async function getAllServerStatuses(): Promise<
 
 export async function getServerStatusById(id: number): Promise<ServerStatus> {
   try {
-    const response = await statsApi.get(`/status/${id}`);
+    const response = await statsApi.get(`/status/${id}`, {
+      validateStatus: (status) => status === 200 || status === 404,
+    });
+    if (response.status === 404) {
+      return {
+        status: "offline",
+        lastChecked: new Date().toISOString(),
+      };
+    }
     return response.data;
   } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return {
+        status: "offline",
+        lastChecked: new Date().toISOString(),
+      };
+    }
     handleApiError(error, "fetch server status");
     throw error;
   }
