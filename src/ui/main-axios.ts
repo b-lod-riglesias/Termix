@@ -898,6 +898,10 @@ function getApiUrl(path: string, defaultPort: number): string {
     const url = `${protocol}://${apiHost}:${sslPort}${path}`;
     return url;
   } else {
+    if (shouldUseReverseProxyPaths()) {
+      return `${getBasePath()}/api${path}`;
+    }
+
     return getBasePath() + path;
   }
 }
@@ -3095,6 +3099,9 @@ export async function unlockUserData(
 export async function getRegistrationAllowed(): Promise<{ allowed: boolean }> {
   try {
     const response = await authApi.get("/users/registration-allowed");
+    if (typeof response.data?.allowed !== "boolean") {
+      return { allowed: true };
+    }
     return response.data;
   } catch (error) {
     handleApiError(error, "check registration status");
@@ -3104,6 +3111,9 @@ export async function getRegistrationAllowed(): Promise<{ allowed: boolean }> {
 export async function getPasswordLoginAllowed(): Promise<{ allowed: boolean }> {
   try {
     const response = await authApi.get("/users/password-login-allowed");
+    if (typeof response.data?.allowed !== "boolean") {
+      return { allowed: true };
+    }
     return response.data;
   } catch (error) {
     handleApiError(error, "check password login status");
@@ -3113,6 +3123,9 @@ export async function getPasswordLoginAllowed(): Promise<{ allowed: boolean }> {
 export async function getOIDCConfig(): Promise<Record<string, unknown>> {
   try {
     const response = await authApi.get("/users/oidc-config");
+    if (!response.data || typeof response.data !== "object") {
+      return null;
+    }
     return response.data;
   } catch (error: unknown) {
     console.warn(
