@@ -80,6 +80,7 @@ import {
   reorderSnippets,
   getSharedSnippets,
   shareSnippet,
+  shareSnippetFolder,
   getSnippetAccess,
   revokeSnippetAccess,
   getRoles,
@@ -225,6 +226,12 @@ export function SSHToolsSidebar({
     }>
   >([]);
   const [shareDialogSnippet, setShareDialogSnippet] = useState<Snippet | null>(
+    null,
+  );
+  const [shareDialogMode, setShareDialogMode] = useState<
+    "snippet" | "folder"
+  >("snippet");
+  const [shareDialogFolder, setShareDialogFolder] = useState<string | null>(
     null,
   );
   const [shareTargetType, setShareTargetType] = useState<"user" | "role">(
@@ -758,6 +765,8 @@ export function SSHToolsSidebar({
   };
 
   const handleOpenShareDialog = async (snippet: Snippet) => {
+    setShareDialogMode("snippet");
+    setShareDialogFolder(null);
     setShareDialogSnippet(snippet);
     setShareTargetId("");
     setShareTargetType("user");
@@ -784,8 +793,63 @@ export function SSHToolsSidebar({
     }
   };
 
+  const handleOpenShareFolderDialog = async (folderName: string) => {
+    setShareDialogMode("folder");
+    setShareDialogSnippet(null);
+    setShareDialogFolder(folderName);
+    setShareTargetId("");
+    setShareTargetType("user");
+    setShareAccessList([]);
+    try {
+      const [usersData, rolesData] = await Promise.all([getUserList(), getRoles()]);
+      setShareUsers(
+        (usersData?.users || []).map((u: Record<string, unknown>) => ({
+          id: u.id as string,
+          username: u.username as string,
+        })),
+      );
+      setShareRoles(
+        (rolesData?.roles || []).map(
+          (r: { id: number; name: string; displayName?: string }) => r,
+        ),
+      );
+    } catch {
+      toast.error(t("snippets.failedToLoadShareData"));
+    }
+  };
+
+  const resetShareDialog = () => {
+    setShareDialogSnippet(null);
+    setShareDialogFolder(null);
+    setShareTargetId("");
+    setShareAccessList([]);
+  };
+
   const handleShare = async () => {
-    if (!shareDialogSnippet || !shareTargetId) return;
+    if (!shareTargetId) return;
+
+    if (shareDialogMode === "folder") {
+      if (!shareDialogFolder) return;
+      try {
+        const result = await shareSnippetFolder(shareDialogFolder, {
+          targetType: shareTargetType,
+          targetUserId: shareTargetType === "user" ? shareTargetId : undefined,
+          targetRoleId:
+            shareTargetType === "role" ? parseInt(shareTargetId) : undefined,
+        });
+        const sharedCountMessage =
+          result.snippetsShared === 1
+            ? "1 snippet"
+            : `${result.snippetsShared} snippets`;
+        toast.success(`Carpeta compartida: ${shareDialogFolder} (${sharedCountMessage})`);
+        resetShareDialog();
+      } catch {
+        toast.error(t("snippets.shareFailed"));
+      }
+      return;
+    }
+
+    if (!shareDialogSnippet) return;
     try {
       await shareSnippet(shareDialogSnippet.id, {
         targetType: shareTargetType,
@@ -1726,6 +1790,17 @@ export function SSHToolsSidebar({
                                           className="h-6 w-6 p-0"
                                           onClick={(e) => {
                                             e.stopPropagation();
+                                            handleOpenShareFolderDialog(folderName);
+                                          }}
+                                        >
+                                          <Share2 className="h-3 w-3" />
+                                        </Button>
+                                        <Button
+                                          size="sm"
+                                          variant="ghost"
+                                          className="h-6 w-6 p-0"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
                                             handleEditFolder(
                                               folderMetadata || {
                                                 id: 0,
@@ -2570,24 +2645,30 @@ export function SSHToolsSidebar({
         </div>
       )}
 
-      {shareDialogSnippet && (
+      {(shareDialogSnippet || shareDialogFolder) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-card border-2 border-border rounded-lg p-6 w-full max-w-md space-y-4 max-h-[80vh] overflow-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">
-                {t("snippets.shareSnippet")}
+                {shareDialogMode === "folder"
+                  ? t("snippets.shareFolder", {
+                      defaultValue: `Compartir carpeta ${shareDialogFolder}`,
+                    })
+                  : t("snippets.shareSnippet")}
               </h3>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setShareDialogSnippet(null)}
+                onClick={resetShareDialog}
               >
                 <X className="w-4 h-4" />
               </Button>
             </div>
 
             <p className="text-sm text-muted-foreground">
-              {shareDialogSnippet.name}
+              {shareDialogMode === "folder"
+                ? shareDialogFolder
+                : shareDialogSnippet?.name}
             </p>
 
             <div className="space-y-3">
@@ -2637,7 +2718,7 @@ export function SSHToolsSidebar({
               </div>
             </div>
 
-            {shareAccessList.length > 0 && (
+            {shareDialogMode === "snippet" && shareAccessList.length > 0 && (
               <div className="space-y-2">
                 <span className="text-sm font-semibold">
                   {t("snippets.currentAccess")}

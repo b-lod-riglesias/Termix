@@ -1544,6 +1544,162 @@ router.post(
 
 /**
  * @openapi
+ * /rbac/snippet/folder/{folderName}/share:
+ *   post:
+ *     summary: Share all snippets in a folder
+ *     description: Shares every snippet from a user folder with a user or role.
+ *     tags:
+ *       - RBAC
+ */
+router.post(
+  "/snippet/folder/:folderName/share",
+  authenticateJWT,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const folderName = Array.isArray(req.params.folderName)
+      ? req.params.folderName[0]
+      : req.params.folderName;
+    const normalizedFolderName = folderName?.trim();
+    const userId = req.userId!;
+
+    if (!normalizedFolderName) {
+      return res
+        .status(400)
+        .json({ error: "Folder name is required to share snippets" });
+    }
+
+    try {
+      const {
+        targetType = "user",
+        targetUserId,
+        targetRoleId,
+        durationHours,
+      } = req.body;
+
+      if (!["user", "role"].includes(targetType)) {
+        return res
+          .status(400)
+          .json({ error: "Invalid target type. Must be 'user' or 'role'" });
+      }
+      if (targetType === "user" && !isNonEmptyString(targetUserId)) {
+        return res
+          .status(400)
+          .json({ error: "Target user ID is required when sharing with user" });
+      }
+      if (targetType === "role" && !targetRoleId) {
+        return res
+          .status(400)
+          .json({ error: "Target role ID is required when sharing with role" });
+      }
+
+      if (targetType === "user") {
+        const targetUser = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.id, targetUserId))
+          .limit(1);
+        if (targetUser.length === 0) {
+          return res.status(404).json({ error: "Target user not found" });
+        }
+      } else {
+        const targetRole = await db
+          .select({ id: roles.id })
+          .from(roles)
+          .where(eq(roles.id, targetRoleId))
+          .limit(1);
+        if (targetRole.length === 0) {
+          return res.status(404).json({ error: "Target role not found" });
+        }
+      }
+
+      const folderSnippets = await db
+        .select({ id: snippets.id })
+        .from(snippets)
+        .where(
+          and(eq(snippets.userId, userId), eq(snippets.folder, normalizedFolderName)),
+        )
+        .limit(500);
+
+      if (folderSnippets.length === 0) {
+        return res.json({
+          success: true,
+          message: "No snippets found in this folder",
+          expiresAt,
+          snippetsShared: 0,
+        });
+      }
+
+      let expiresAt: string | null = null;
+      if (
+        durationHours &&
+        typeof durationHours === "number" &&
+        durationHours > 0
+      ) {
+        const expiryDate = new Date();
+        expiryDate.setHours(expiryDate.getHours() + durationHours);
+        expiresAt = expiryDate.toISOString();
+      }
+
+      await db.transaction(async (tx) => {
+        for (const snippetEntry of folderSnippets) {
+          const snippetId = snippetEntry.id;
+
+          const whereConditions = [
+            eq(snippetAccess.snippetId, snippetId),
+            targetType === "user"
+              ? eq(snippetAccess.userId, targetUserId)
+              : eq(snippetAccess.roleId, targetRoleId),
+          ];
+
+          const existing = await tx
+            .select()
+            .from(snippetAccess)
+            .where(and(...whereConditions))
+            .limit(1);
+
+          if (existing.length > 0) {
+            await tx
+              .update(snippetAccess)
+              .set({ expiresAt })
+              .where(eq(snippetAccess.id, existing[0].id));
+            continue;
+          }
+
+          await tx.insert(snippetAccess).values({
+            snippetId,
+            userId: targetType === "user" ? targetUserId : null,
+            roleId: targetType === "role" ? targetRoleId : null,
+            grantedBy: userId,
+            permissionLevel: "view",
+            expiresAt,
+          });
+        }
+      });
+
+      databaseLogger.success("Snippet folder shared successfully", {
+        operation: "rbac_snippet_folder_share",
+        userId,
+        folderName: normalizedFolderName,
+        targetType,
+      });
+
+      res.json({
+        success: true,
+        message: `Snippet folder shared successfully with ${targetType}`,
+        expiresAt,
+        snippetsShared: folderSnippets.length,
+      });
+    } catch (error) {
+      databaseLogger.error("Failed to share snippet folder", error, {
+        operation: "share_snippet_folder",
+        userId,
+      });
+      res.status(500).json({ error: "Failed to share snippet folder" });
+    }
+  },
+);
+
+/**
+ * @openapi
  * /rbac/snippet/{id}/access/{accessId}:
  *   delete:
  *     summary: Revoke snippet access

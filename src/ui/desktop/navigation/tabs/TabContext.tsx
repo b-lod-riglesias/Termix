@@ -124,7 +124,11 @@ interface TabContextType {
   getSessionRootForTab: (tabId: number) => number;
   resolveSplitPickerToTerminal: (
     pickerTabId: number,
-    payload: { title: string; hostConfig: any },
+    payload: {
+      title: string;
+      hostConfig: any;
+      appType?: "terminal" | "file_manager" | "server_stats" | "rdp" | "vnc" | "telnet";
+    },
   ) => void;
   cancelSplitPicker: (pickerTabId: number) => void;
   getTab: (tabId: number) => Tab | undefined;
@@ -736,17 +740,34 @@ export function TabProvider({ children }: TabProviderProps) {
 
   const resolveSplitPickerToTerminal = (
     pickerTabId: number,
-    payload: { title: string; hostConfig: any },
+    payload: {
+      title: string;
+      hostConfig: any;
+      appType?:
+        | "terminal"
+        | "file_manager"
+        | "server_stats"
+        | "rdp"
+        | "vnc"
+        | "telnet";
+    },
   ) => {
     const connectionType = payload.hostConfig?.connectionType || "ssh";
-    const tabType =
-      connectionType === "rdp" ||
-      connectionType === "vnc" ||
-      connectionType === "telnet"
+    const requestedAppType = payload.appType;
+    const tabType = requestedAppType
+      ? requestedAppType
+      : connectionType === "rdp" ||
+          connectionType === "vnc" ||
+          connectionType === "telnet"
         ? (connectionType as "rdp" | "vnc" | "telnet")
         : "terminal";
-    const persistentSessionId = `termix_${pickerTabId}`;
-    const newInstanceId = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const shouldBeTerminal = tabType === "terminal";
+    const newInstanceId = `tab_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2, 9)}`;
+    const persistentSessionId = shouldBeTerminal
+      ? `termix_${pickerTabId}`
+      : undefined;
 
     setTabs((prev) =>
       prev.map((tab) =>
@@ -762,13 +783,13 @@ export function TabProvider({ children }: TabProviderProps) {
                     instanceId: tab.instanceId || newInstanceId,
                   }
                 : payload.hostConfig,
-              terminalRef:
-                tabType === "terminal" ? React.createRef<any>() : undefined,
+              terminalRef: shouldBeTerminal
+                ? React.createRef<any>()
+                : undefined,
               persistentSessionId,
-              executeCommand:
-                tabType === "terminal"
-                  ? buildPersistentShellCommand(persistentSessionId)
-                  : undefined,
+              executeCommand: shouldBeTerminal
+                ? buildPersistentShellCommand(persistentSessionId || "")
+                : undefined,
             }
           : tab,
       ),

@@ -4809,6 +4809,26 @@ export async function shareSnippet(
   }
 }
 
+export async function shareSnippetFolder(
+  folderName: string,
+  shareData: {
+    targetType: "user" | "role";
+    targetUserId?: string;
+    targetRoleId?: number;
+    durationHours?: number;
+  },
+): Promise<{ success: boolean; snippetsShared: number }> {
+  try {
+    const response = await rbacApi.post(
+      `/rbac/snippet/folder/${encodeURIComponent(folderName)}/share`,
+      shareData,
+    );
+    return response.data;
+  } catch (error) {
+    throw handleApiError(error, "share snippet folder");
+  }
+}
+
 export async function getSnippetAccess(
   snippetId: number,
 ): Promise<{ accessList: AccessRecord[] }> {

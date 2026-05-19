@@ -119,6 +119,41 @@ function ServerStatsInner({
   );
   const [hasConnectionError, setHasConnectionError] = React.useState(false);
 
+  const resolveHostConfig = React.useCallback(
+    async (seedHostConfig: HostConfig | null | undefined) => {
+      if (!seedHostConfig) return null;
+      try {
+        const hosts = await getSSHHosts();
+        let resolved = hosts.find((h) => h.id === seedHostConfig.id);
+
+        if (!resolved && seedHostConfig.ip && seedHostConfig.port) {
+          resolved = hosts.find(
+            (h) =>
+              h.ip === seedHostConfig.ip &&
+              Number(h.port) === Number(seedHostConfig.port) &&
+              h.username === seedHostConfig.username &&
+              (h.connectionType || "ssh") ===
+                (seedHostConfig.connectionType || "ssh"),
+          );
+        }
+
+        if (!resolved && seedHostConfig.name) {
+          resolved = hosts.find(
+            (h) =>
+              h.name === seedHostConfig.name &&
+              (h.folder || "") === (seedHostConfig.folder || "") &&
+              h.ip === seedHostConfig.ip,
+          );
+        }
+
+        return resolved || null;
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
+
   const activityLoggedRef = React.useRef(false);
   const activityLoggingRef = React.useRef(false);
 
@@ -292,40 +327,49 @@ function ServerStatsInner({
   };
 
   React.useEffect(() => {
-    const fetchLatestHostConfig = async () => {
-      if (hostConfig?.id) {
-        try {
-          const hosts = await getSSHHosts();
-          const updatedHost = hosts.find((h) => h.id === hostConfig.id);
-          if (updatedHost) {
-            setCurrentHostConfig(updatedHost);
-          }
-        } catch {
-          toast.error(t("serverStats.failedToFetchHostConfig"));
+    const updateHostConfig = async () => {
+      const resolvedHostConfig = await resolveHostConfig(hostConfig);
+      if (resolvedHostConfig) {
+        if (resolvedHostConfig.id !== currentHostConfig?.id) {
+          setCurrentHostConfig(resolvedHostConfig as HostConfig);
+          setMetrics(null);
+          setMetricsHistory([]);
+          setServerStatus("offline");
+          setHasConnectionError(false);
+          setTotpVerified(false);
+          setTotpSessionId(null);
+          setViewerSessionId(null);
+          setTotpRequired(false);
         }
+        return;
+      }
+
+      if (hostConfig) {
+        setCurrentHostConfig(hostConfig);
       }
     };
 
-    fetchLatestHostConfig();
+    updateHostConfig();
 
     const handleHostsChanged = async () => {
-      if (hostConfig?.id) {
-        try {
-          const hosts = await getSSHHosts();
-          const updatedHost = hosts.find((h) => h.id === hostConfig.id);
-          if (updatedHost) {
-            setCurrentHostConfig(updatedHost);
-          }
-        } catch {
-          toast.error(t("serverStats.failedToFetchHostConfig"));
-        }
-      }
+      await updateHostConfig();
     };
 
     window.addEventListener("ssh-hosts:changed", handleHostsChanged);
     return () =>
       window.removeEventListener("ssh-hosts:changed", handleHostsChanged);
-  }, [hostConfig?.id]);
+  }, [
+    hostConfig,
+    hostConfig?.id,
+    hostConfig?.ip,
+    hostConfig?.username,
+    hostConfig?.port,
+    hostConfig?.name,
+    hostConfig?.folder,
+    hostConfig?.connectionType,
+    currentHostConfig?.id,
+    resolveHostConfig,
+  ]);
 
   React.useEffect(() => {
     if (!statusCheckEnabled || !currentHostConfig?.id) {
