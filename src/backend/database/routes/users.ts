@@ -1582,7 +1582,7 @@ router.post("/login", async (req, res) => {
       success: true,
       is_admin: !!userRecord.isAdmin,
       username: userRecord.username,
-      ...(isNativeAppRequest(req) ? { token } : {}),
+      token,
     };
 
     const timeoutRow = db.$client

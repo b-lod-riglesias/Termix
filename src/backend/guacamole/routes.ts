@@ -4,6 +4,7 @@ import { guacLogger } from "../utils/logger.js";
 import { AuthManager } from "../utils/auth-manager.js";
 import { PermissionManager } from "../utils/permission-manager.js";
 import { SimpleDBOps } from "../utils/simple-db-ops.js";
+import { SharedCredentialManager } from "../utils/shared-credential-manager.js";
 import { getDb } from "../database/db/index.js";
 import { hosts } from "../database/db/schema.js";
 import { eq } from "drizzle-orm";
@@ -12,6 +13,7 @@ import type { AuthenticatedRequest } from "../../types/index.js";
 const router = express.Router();
 const tokenService = GuacamoleTokenService.getInstance();
 const authManager = AuthManager.getInstance();
+const sharedCredentialManager = SharedCredentialManager.getInstance();
 
 router.use(authManager.createAuthMiddleware());
 
@@ -149,7 +151,7 @@ router.post(
         return res.status(404).json({ error: "Host not found" });
       }
 
-      const host = hostResults[0];
+      let host = hostResults[0] as Record<string, unknown>;
 
       if (host.userId !== userId) {
         const permissionManager = PermissionManager.getInstance();
@@ -166,6 +168,37 @@ router.post(
             hostId,
           });
           return res.status(403).json({ error: "Access denied to this host" });
+        }
+
+        try {
+          const sharedCredential =
+            await sharedCredentialManager.getSharedCredentialForUser(hostId, userId);
+
+          if (sharedCredential) {
+            const hostForUser = { ...hostResults[0] } as Record<string, unknown>;
+            hostForUser.password = sharedCredential.password || hostForUser.password;
+            hostForUser.key = sharedCredential.key || hostForUser.key;
+            hostForUser.keyPassword =
+              sharedCredential.keyPassword || hostForUser.keyPassword;
+            hostForUser.keyType = sharedCredential.keyType || hostForUser.keyType;
+
+            const overrideCredentialUsername = Boolean(
+              hostForUser.overrideCredentialUsername,
+            );
+            if (!overrideCredentialUsername) {
+              hostForUser.username =
+                sharedCredential.username || hostForUser.username;
+            }
+
+            host = hostForUser;
+          }
+        } catch (error) {
+          guacLogger.warn("Failed to resolve shared credentials for guacamole", {
+            operation: "guac_shared_credential_fallback",
+            userId,
+            hostId,
+            error: error instanceof Error ? error.message : "Unknown error",
+          });
         }
       }
 

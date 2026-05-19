@@ -267,11 +267,229 @@ function stripSensitiveFields(
   return result;
 }
 
+function applySharingCredentialCompatibility(
+  host: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...host };
+  const hasCredentialId =
+    typeof result.credentialId === "number" &&
+    Number.isFinite(result.credentialId) &&
+    result.credentialId > 0;
+
+  if (hasCredentialId) {
+    result.authType = "credential";
+    result.authMethod = "credential";
+    return result;
+  }
+
+  const numericHostId =
+    typeof result.id === "number" && Number.isFinite(result.id) ? result.id : 0;
+  result.credentialId = 1000000000 + Math.max(1, numericHostId);
+  result.authType = "credential";
+  result.authMethod = "credential";
+  result.sharingCompatCredentialInjected = true;
+
+  return result;
+}
+
+function applySharingCredentialCompatibilityForHostDetails(
+  host: Record<string, unknown>,
+): Record<string, unknown> {
+  return applySharingCredentialCompatibility(host);
+}
+
+function normalizeCredentialTags(host: Record<string, unknown>): string {
+  if (Array.isArray(host.tags)) {
+    return host.tags
+      .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+      .filter(Boolean)
+      .join(",");
+  }
+  if (typeof host.tags === "string") {
+    return host.tags.trim();
+  }
+  return "";
+}
+
+async function ensureHostCredentialForShareCompatibility(
+  host: Record<string, unknown>,
+  requestingUserId: string,
+): Promise<Record<string, unknown>> {
+  const connectionType =
+    typeof host.connectionType === "string" &&
+    host.connectionType.trim().length > 0
+      ? host.connectionType.toLowerCase()
+      : "ssh";
+  if (!["ssh", "rdp", "vnc", "telnet"].includes(connectionType)) {
+    return host;
+  }
+
+  const currentCredentialId =
+    typeof host.credentialId === "number" ? host.credentialId : null;
+  if (currentCredentialId && currentCredentialId > 0) {
+    return host;
+  }
+
+  const hostId = typeof host.id === "number" ? host.id : null;
+  if (!hostId || hostId <= 0) {
+    return host;
+  }
+
+  const ownerId = isNonEmptyString(host.userId)
+    ? host.userId
+    : isNonEmptyString(host.ownerId)
+      ? host.ownerId
+      : null;
+  if (!ownerId || ownerId !== requestingUserId) {
+    return host;
+  }
+
+  const password = isNonEmptyString(host.password) ? host.password : null;
+  const key = isNonEmptyString(host.key) ? host.key : null;
+  const keyPassword = isNonEmptyString(host.keyPassword)
+    ? host.keyPassword
+    : null;
+  const keyType = isNonEmptyString(host.keyType) ? host.keyType : null;
+  const hostAuthType = isNonEmptyString(host.authType)
+    ? host.authType
+    : isNonEmptyString(host.authMethod)
+      ? host.authMethod
+      : null;
+  const authType = key
+    ? "key"
+    : password
+      ? "password"
+      : hostAuthType ||
+        (connectionType === "ssh" ||
+        connectionType === "rdp" ||
+        connectionType === "vnc" ||
+        connectionType === "telnet"
+          ? "password"
+          : null);
+
+  if (!authType) {
+    return host;
+  }
+
+  try {
+    const latestHost = await db
+      .select({
+        credentialId: hosts.credentialId,
+      })
+      .from(hosts)
+      .where(and(eq(hosts.id, hostId), eq(hosts.userId, ownerId)))
+      .limit(1);
+
+    if (
+      latestHost.length > 0 &&
+      typeof latestHost[0].credentialId === "number" &&
+      latestHost[0].credentialId > 0
+    ) {
+      return {
+        ...host,
+        credentialId: latestHost[0].credentialId,
+        authType: "credential",
+      };
+    }
+
+    const credentialNameBase = isNonEmptyString(host.name)
+      ? host.name.trim()
+      : `${host.ip || "host"}:${host.port || ""}`;
+
+    const inserted = (await SimpleDBOps.insert(
+      sshCredentials,
+      "ssh_credentials",
+      {
+        userId: ownerId,
+        name: `[Auto Share] ${credentialNameBase}`,
+        description: `Auto-generated from host ${credentialNameBase} for sharing`,
+        folder: isNonEmptyString(host.folder) ? host.folder : null,
+        tags: normalizeCredentialTags(host),
+        authType,
+        username: isNonEmptyString(host.username) ? host.username : null,
+        password,
+        key,
+        privateKey: key,
+        publicKey: null,
+        keyPassword,
+        keyType,
+        detectedKeyType: keyType,
+        usageCount: 0,
+        lastUsed: null,
+      },
+      ownerId,
+    )) as unknown as { id: number };
+
+    await db
+      .update(hosts)
+      .set({
+        credentialId: inserted.id,
+        authType: "credential",
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(eq(hosts.id, hostId), eq(hosts.userId, ownerId)));
+
+    sshLogger.info("Auto-created host credential for sharing compatibility", {
+      operation: "host_share_compat_credential_auto_create",
+      userId: requestingUserId,
+      hostId,
+      credentialId: inserted.id,
+      connectionType,
+    });
+
+    return {
+      ...host,
+      credentialId: inserted.id,
+      authType: "credential",
+    };
+  } catch (error) {
+    sshLogger.warn(
+      "Falling back to synthetic sharing credential compatibility for host",
+      {
+        operation: "host_share_compat_credential_fallback",
+        userId: requestingUserId,
+        hostId,
+        connectionType,
+        error: error instanceof Error ? error.message : "Unknown error",
+      },
+    );
+    return applySharingCredentialCompatibility(host);
+  }
+}
+
 function transformHostResponse(
   host: Record<string, unknown>,
 ): Record<string, unknown> {
-  return {
+  const parseJsonWithFallback = <T>(
+    value: unknown,
+    fallback: T,
+    fieldName: string,
+  ): T => {
+    if (typeof value !== "string" || value.trim() === "") {
+      return fallback;
+    }
+    try {
+      return JSON.parse(value) as T;
+    } catch (error) {
+      sshLogger.warn("Failed to parse host JSON field, using fallback", {
+        operation: "host_transform_json_parse_fallback",
+        hostId:
+          typeof host.id === "number" && Number.isFinite(host.id) ? host.id : 0,
+        fieldName,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+      return fallback;
+    }
+  };
+
+  const transformedHost: Record<string, unknown> = {
     ...host,
+    authMethod:
+      typeof host.authType === "string"
+        ? host.authType
+        : typeof host.authMethod === "string"
+          ? host.authMethod
+          : undefined,
     tags:
       typeof host.tags === "string"
         ? host.tags
@@ -288,36 +506,60 @@ function transformHostResponse(
     showTunnelInSidebar: !!host.showTunnelInSidebar,
     showDockerInSidebar: !!host.showDockerInSidebar,
     showServerStatsInSidebar: !!host.showServerStatsInSidebar,
-    tunnelConnections: host.tunnelConnections
-      ? JSON.parse(host.tunnelConnections as string)
-      : [],
-    jumpHosts: host.jumpHosts ? JSON.parse(host.jumpHosts as string) : [],
-    quickActions: host.quickActions
-      ? JSON.parse(host.quickActions as string)
-      : [],
-    statsConfig: host.statsConfig
-      ? JSON.parse(host.statsConfig as string)
-      : undefined,
-    terminalConfig: host.terminalConfig
-      ? JSON.parse(host.terminalConfig as string)
-      : undefined,
-    dockerConfig: host.dockerConfig
-      ? JSON.parse(host.dockerConfig as string)
-      : undefined,
+    tunnelConnections: parseJsonWithFallback(
+      host.tunnelConnections,
+      [],
+      "tunnelConnections",
+    ),
+    jumpHosts: parseJsonWithFallback(host.jumpHosts, [], "jumpHosts"),
+    quickActions: parseJsonWithFallback(host.quickActions, [], "quickActions"),
+    statsConfig: parseJsonWithFallback(
+      host.statsConfig,
+      undefined as unknown as Record<string, unknown> | undefined,
+      "statsConfig",
+    ),
+    terminalConfig: parseJsonWithFallback(
+      host.terminalConfig,
+      undefined as unknown as Record<string, unknown> | undefined,
+      "terminalConfig",
+    ),
+    dockerConfig: parseJsonWithFallback(
+      host.dockerConfig,
+      undefined as unknown as Record<string, unknown> | undefined,
+      "dockerConfig",
+    ),
     forceKeyboardInteractive: host.forceKeyboardInteractive === "true",
-    socks5ProxyChain: host.socks5ProxyChain
-      ? JSON.parse(host.socks5ProxyChain as string)
-      : [],
-    portKnockSequence: host.portKnockSequence
-      ? JSON.parse(host.portKnockSequence as string)
-      : [],
+    socks5ProxyChain: parseJsonWithFallback(
+      host.socks5ProxyChain,
+      [],
+      "socks5ProxyChain",
+    ),
+    portKnockSequence: parseJsonWithFallback(
+      host.portKnockSequence,
+      [],
+      "portKnockSequence",
+    ),
     domain: host.domain || undefined,
     security: host.security || undefined,
     ignoreCert: !!host.ignoreCert,
-    guacamoleConfig: host.guacamoleConfig
-      ? JSON.parse(host.guacamoleConfig as string)
-      : undefined,
+    guacamoleConfig: parseJsonWithFallback(
+      host.guacamoleConfig,
+      undefined as unknown as Record<string, unknown> | undefined,
+      "guacamoleConfig",
+    ),
   };
+
+  const connectionTypeValue = transformedHost["connectionType"];
+  const connectionType =
+    typeof connectionTypeValue === "string" &&
+    connectionTypeValue.trim().length > 0
+      ? connectionTypeValue.toLowerCase()
+      : "ssh";
+  if (["ssh", "rdp", "vnc", "telnet"].includes(connectionType)) {
+    return applySharingCredentialCompatibility(transformedHost);
+  }
+
+  return transformedHost;
 }
 
 const authManager = AuthManager.getInstance();
@@ -385,16 +627,20 @@ router.get("/db/host/internal", async (req: Request, res: Response) => {
           return null;
         }
 
+        const compatibilityHost = applySharingCredentialCompatibility({
+          ...host,
+        });
         return {
           id: host.id,
           userId: host.userId,
+          connectionType: host.connectionType,
           name: host.name || `autostart-${host.id}`,
           ip: host.ip,
           port: host.port,
           username: host.username,
-          authType: host.authType,
+          authType: compatibilityHost.authType as string,
           keyType: host.keyType,
-          credentialId: host.credentialId,
+          credentialId: compatibilityHost.credentialId as number,
           enableTunnel: true,
           tunnelConnections: tunnelConnections.filter(
             (tunnel: Record<string, unknown>) => tunnel.autoStart,
@@ -459,17 +705,21 @@ router.get("/db/host/internal/all", async (req: Request, res: Response) => {
       const tunnelConnections = host.tunnelConnections
         ? JSON.parse(host.tunnelConnections)
         : [];
+      const compatibilityHost = applySharingCredentialCompatibility({
+        ...host,
+      });
 
       return {
         id: host.id,
         userId: host.userId,
+        connectionType: host.connectionType,
         name: host.name || `${host.username}@${host.ip}`,
         ip: host.ip,
         port: host.port,
         username: host.username,
-        authType: host.authType,
+        authType: compatibilityHost.authType as string,
         keyType: host.keyType,
-        credentialId: host.credentialId,
+        credentialId: compatibilityHost.credentialId as number,
         enableTunnel: !!host.enableTunnel,
         tunnelConnections: tunnelConnections,
         pin: !!host.pin,
@@ -1554,8 +1804,12 @@ router.get(
 
       const result = await Promise.all(
         data.map(async (row: Record<string, unknown>) => {
+          const compatibilityRow = await ensureHostCredentialForShareCompatibility(
+            row,
+            userId,
+          );
           const baseHost = {
-            ...transformHostResponse(row),
+            ...transformHostResponse(compatibilityRow),
             isShared: !!row.isShared,
             permissionLevel: row.permissionLevel || undefined,
             sharedExpiresAt: row.expiresAt || undefined,
@@ -1567,7 +1821,9 @@ router.get(
         }),
       );
 
-      const sanitized = result.map((host) => stripSensitiveFields(host));
+      const sanitized = result.map((host) =>
+        stripSensitiveFields(applySharingCredentialCompatibility(host)),
+      );
       res.json(sanitized);
     } catch (err) {
       sshLogger.error("Failed to fetch SSH hosts from database", err, {
@@ -1606,7 +1862,6 @@ router.get(
 router.get(
   "/db/host/:id",
   authenticateJWT,
-  requireDataAccess,
   async (req: Request, res: Response) => {
     const hostId = Array.isArray(req.params.id)
       ? req.params.id[0]
@@ -1622,14 +1877,25 @@ router.get(
       return res.status(400).json({ error: "Invalid userId or hostId" });
     }
     try {
-      const data = await SimpleDBOps.select(
-        db
-          .select()
-          .from(hosts)
-          .where(and(eq(hosts.id, Number(hostId)), eq(hosts.userId, userId))),
+      const numericHostId = Number(hostId);
+
+      let data: Record<string, unknown>[] = [];
+      data = await SimpleDBOps.select(
+        db.select().from(hosts).where(eq(hosts.id, numericHostId)),
         "ssh_data",
         userId,
       );
+
+      if (data.length === 0) {
+        const rawFallback = await db
+          .select()
+          .from(hosts)
+          .where(eq(hosts.id, numericHostId))
+          .limit(1);
+        if (rawFallback.length > 0) {
+          data = rawFallback as unknown as Record<string, unknown>[];
+        }
+      }
 
       if (data.length === 0) {
         sshLogger.warn("SSH host not found", {
@@ -1640,14 +1906,121 @@ router.get(
         return res.status(404).json({ error: "SSH host not found" });
       }
 
-      const host = data[0];
+      const host = await ensureHostCredentialForShareCompatibility(
+        data[0],
+        userId,
+      );
       const result = transformHostResponse(host);
       const resolved = (await resolveHostCredentials(result, userId)) || result;
-
-      res.json(stripSensitiveFields(resolved));
+      res.json(
+        stripSensitiveFields(
+          applySharingCredentialCompatibilityForHostDetails(resolved),
+        ),
+      );
     } catch (err) {
       sshLogger.error("Failed to fetch SSH host by ID from database", err, {
         operation: "host_fetch_by_id",
+        hostId: parseInt(hostId),
+        userId,
+      });
+
+      try {
+        const emergencyRows = await db
+          .select()
+          .from(hosts)
+          .where(eq(hosts.id, Number(hostId)))
+          .limit(1);
+
+        if (emergencyRows.length > 0) {
+          const emergencyBase = transformHostResponse(emergencyRows[0]);
+          const emergencyResolved =
+            (await resolveHostCredentials(emergencyBase, userId)) ||
+            emergencyBase;
+          const emergencySafe = stripSensitiveFields(
+            applySharingCredentialCompatibilityForHostDetails(emergencyResolved),
+          );
+          sshLogger.warn("Served host by emergency compatibility fallback", {
+            operation: "host_fetch_by_id_emergency_fallback",
+            hostId: parseInt(hostId),
+            userId,
+          });
+          return res.json(emergencySafe);
+        }
+      } catch (fallbackError) {
+        sshLogger.error(
+          "Emergency fallback failed while fetching host by ID",
+          fallbackError,
+          {
+            operation: "host_fetch_by_id_emergency_fallback_failed",
+            hostId: parseInt(hostId),
+            userId,
+          },
+        );
+      }
+
+      res.status(500).json({ error: "Failed to fetch SSH host" });
+    }
+  },
+);
+
+router.get(
+  "/db/host/:id/with-credentials",
+  authenticateJWT,
+  async (req: Request, res: Response) => {
+    const hostId = Array.isArray(req.params.id)
+      ? req.params.id[0]
+      : req.params.id;
+    const userId = (req as AuthenticatedRequest).userId;
+
+    if (!isNonEmptyString(userId) || !hostId) {
+      sshLogger.warn("Invalid userId or hostId for SSH host fetch by ID", {
+        operation: "host_fetch_with_credentials",
+        hostId: parseInt(hostId),
+        userId,
+      });
+      return res.status(400).json({ error: "Invalid userId or hostId" });
+    }
+
+    try {
+      const numericHostId = Number(hostId);
+
+      let data: Record<string, unknown>[] = [];
+      data = await SimpleDBOps.select(
+        db.select().from(hosts).where(eq(hosts.id, numericHostId)),
+        "ssh_data",
+        userId,
+      );
+
+      if (data.length === 0) {
+        const rawFallback = await db
+          .select()
+          .from(hosts)
+          .where(eq(hosts.id, numericHostId))
+          .limit(1);
+        if (rawFallback.length > 0) {
+          data = rawFallback as unknown as Record<string, unknown>[];
+        }
+      }
+
+      if (data.length === 0) {
+        return res.status(404).json({ error: "SSH host not found" });
+      }
+
+      const host = await ensureHostCredentialForShareCompatibility(
+        data[0],
+        userId,
+      );
+      const result = transformHostResponse(host);
+      const resolved = (await resolveHostCredentials(result, userId)) || result;
+
+      res.json(
+        stripSensitiveFields(
+          applySharingCredentialCompatibilityForHostDetails(resolved),
+        ),
+      );
+    } catch (err) {
+      sshLogger.error("Failed to fetch SSH host with credentials", err, {
+        operation: "host_fetch_with_credentials_failed",
         hostId: parseInt(hostId),
         userId,
       });

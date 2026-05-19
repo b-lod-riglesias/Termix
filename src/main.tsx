@@ -4,7 +4,6 @@ import { StrictMode, Suspense, lazy, useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import { ThemeProvider } from "@/components/theme-provider";
-import { PwaInstallButton } from "@/components/PwaInstallButton";
 import "./i18n/i18n";
 import { isElectron } from "@/lib/electron";
 
@@ -179,7 +178,6 @@ function RootApp() {
           <Suspense fallback={null}>{renderApp()}</Suspense>
         )}
       </div>
-      {!isFullscreen && <PwaInstallButton />}
     </>
   );
 }

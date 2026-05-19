@@ -59,12 +59,10 @@ import {
   Globe,
   Keyboard,
   Share2,
-  Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { useConfirmation } from "@/hooks/use-confirmation.ts";
-import { usePwaInstall } from "@/hooks/use-pwa-install.ts";
 import {
   getSnippets,
   createSnippet,
@@ -179,14 +177,6 @@ export function SSHToolsSidebar({
   onTabChange,
 }: SSHToolsSidebarProps) {
   const { t } = useTranslation();
-  const {
-    canInstall: canInstallApp,
-    isInstalled: isAppInstalled,
-    isSecureContext: isPwaSecureContext,
-    browserName: pwaBrowserName,
-    installHelp: pwaInstallHelp,
-    install: installApp,
-  } = usePwaInstall();
   const { confirmWithToast } = useConfirmation();
   const {
     tabs,
@@ -1253,26 +1243,6 @@ export function SSHToolsSidebar({
     }
   };
 
-  const handleInstallApp = async () => {
-    const outcome = await installApp();
-
-    if (outcome === "accepted" || outcome === "installed") {
-      toast.success("Termix instalado como aplicación");
-      return;
-    }
-
-    if (outcome === "dismissed") {
-      return;
-    }
-
-    if (!isPwaSecureContext) {
-      toast.error(pwaInstallHelp, { duration: 12000 });
-      return;
-    }
-
-    toast.info(pwaInstallHelp, { duration: 12000 });
-  };
-
   return (
     <>
       {isOpen && (
@@ -1420,47 +1390,6 @@ export function SSHToolsSidebar({
                         {t("sshTools.enableRightClickCopyPaste")}
                       </label>
                     </div>
-
-                    <Separator />
-
-                    <div className="rounded-lg border border-edge bg-canvas/60 p-3 space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Download className="h-4 w-4 text-muted-foreground" />
-                        <h3 className="font-semibold text-foreground">
-                          Instalar aplicación
-                        </h3>
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        Crea un acceso directo tipo app, como ChatGPT. No
-                        instala un programa nuevo ni cambia tus datos.
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Navegador detectado: {pwaBrowserName}. Estado:{" "}
-                        {isAppInstalled
-                          ? "ya instalada"
-                          : canInstallApp
-                            ? "lista para instalar"
-                            : isPwaSecureContext
-                              ? "esperando al navegador"
-                              : "requiere HTTPS"}
-                        .
-                      </p>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="w-full"
-                        onClick={handleInstallApp}
-                        disabled={isAppInstalled}
-                      >
-                        {isAppInstalled
-                          ? "Aplicación instalada"
-                          : canInstallApp
-                            ? "Instalar Termix"
-                            : "Abrir instalador"}
-                      </Button>
-                    </div>
-
-                    <Separator />
 
                     <div className="space-y-3">
                       <div className="flex items-center gap-2">

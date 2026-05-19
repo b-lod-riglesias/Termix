@@ -75,11 +75,13 @@ export function LeftSidebar({
     tabs: tabList,
     addTab,
     setCurrentTab,
+    updateTab,
     allSplitScreenTab,
   } = useTabs() as {
     tabs: Array<{ id: number; type: string; [key: string]: unknown }>;
     addTab: (tab: { type: string; [key: string]: unknown }) => number;
     setCurrentTab: (id: number) => void;
+    updateTab: (id: number, updates: Record<string, unknown>) => void;
     allSplitScreenTab: number[];
   };
   const isSplitScreenActive =
@@ -88,10 +90,19 @@ export function LeftSidebar({
   const openSshManagerTab = () => {
     if (isSplitScreenActive) return;
     if (sshManagerTab) {
+      updateTab(sshManagerTab.id, {
+        hostConfig: null,
+        initialTab: "hosts",
+      });
       setCurrentTab(sshManagerTab.id);
       return;
     }
-    const id = addTab({ type: "ssh_manager", title: t("nav.hostManager") });
+    const id = addTab({
+      type: "ssh_manager",
+      title: t("nav.hostManager"),
+      hostConfig: null,
+      initialTab: "hosts",
+    });
     setCurrentTab(id);
   };
   const adminTab = tabList.find((t) => t.type === "admin");

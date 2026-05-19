@@ -21,9 +21,11 @@ import {
   getSnippets,
   deleteCommandFromHistory,
   getCommandHistory,
+  getCurrentToken,
   shouldUseReverseProxyPaths,
   getProxyAwareWebSocketUrl,
 } from "@/ui/main-axios.ts";
+import { dbHealthMonitor } from "@/lib/db-health-monitor.ts";
 import { TOTPDialog } from "@/ui/desktop/navigation/dialogs/TOTPDialog.tsx";
 import { SSHAuthDialog } from "@/ui/desktop/navigation/dialogs/SSHAuthDialog.tsx";
 import { WarpgateDialog } from "@/ui/desktop/navigation/dialogs/WarpgateDialog.tsx";
@@ -483,6 +485,21 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
       return () => clearInterval(authCheckInterval);
     }, []);
 
+    const resolveWebSocketToken = useCallback(async () => {
+      const jwtToken = getCookie("jwt");
+      if (jwtToken && jwtToken.trim() !== "") {
+        return jwtToken;
+      }
+
+      const currentToken = await getCurrentToken();
+      if (currentToken && currentToken.trim() !== "") {
+        localStorage.setItem("jwt", currentToken);
+        return currentToken;
+      }
+
+      return null;
+    }, []);
+
     function hardRefresh() {
       try {
         if (
@@ -780,7 +797,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
         8000,
       );
 
-      reconnectTimeoutRef.current = setTimeout(() => {
+      reconnectTimeoutRef.current = setTimeout(async () => {
         reconnectTimeoutRef.current = null;
 
         if (
@@ -797,7 +814,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           return;
         }
 
-        const jwtToken = getCookie("jwt");
+        const jwtToken = await resolveWebSocketToken();
         if (!jwtToken || jwtToken.trim() === "") {
           console.warn("Reconnection cancelled - no authentication token");
           isReconnectingRef.current = false;
@@ -825,7 +842,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
       }, delay);
     }
 
-    function connectToHost(cols: number, rows: number) {
+    async function connectToHost(cols: number, rows: number) {
       if (isConnectingRef.current) {
         return;
       }
@@ -846,7 +863,7 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           window.location.port === "5173" ||
           window.location.port === "");
 
-      const jwtToken = getCookie("jwt");
+      const jwtToken = await resolveWebSocketToken();
 
       if (!jwtToken || jwtToken.trim() === "") {
         console.error("No JWT token available for WebSocket connection");
@@ -854,6 +871,11 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
         setIsConnecting(false);
         updateConnectionError("Authentication required");
         isConnectingRef.current = false;
+        addLog({
+          type: "error",
+          stage: "auth",
+          message: t("terminal.authenticationRequired"),
+        });
         return;
       }
 
@@ -1532,12 +1554,9 @@ const TerminalInner = forwardRef<TerminalHandle, SSHTerminalProps>(
           updateConnectionError("Authentication failed - please re-login");
           setIsConnecting(false);
           shouldNotReconnectRef.current = true;
+          dbHealthMonitor.reportSessionExpired();
 
           localStorage.removeItem("jwt");
-
-          setTimeout(() => {
-            window.location.reload();
-          }, 1000);
 
           return;
         }

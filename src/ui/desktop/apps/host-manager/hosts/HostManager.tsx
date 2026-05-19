@@ -93,7 +93,16 @@ export function HostManager({
         setActiveTab(normalizedTab);
       }
 
-      if (hostConfig && hostConfig.id !== lastProcessedHostIdRef.current) {
+      if (!hostConfig) {
+        lastProcessedHostIdRef.current = undefined;
+        setEditingHost(null);
+        setIsAddingHost(false);
+
+        if (normalizedTab === "hosts") {
+          setEditingCredential(null);
+          setIsAddingCredential(false);
+        }
+      } else if (hostConfig.id !== lastProcessedHostIdRef.current) {
         lastProcessedHostIdRef.current = hostConfig.id;
         setIsAddingHost(false);
         exportSSHHostWithCredentials(hostConfig.id)
@@ -101,9 +110,6 @@ export function HostManager({
             setEditingHost({ ...hostConfig, ...fullHost } as SSHHost),
           )
           .catch(() => setEditingHost(hostConfig));
-      } else if (!hostConfig && editingHost) {
-        setEditingHost(null);
-        setIsAddingHost(false);
       }
     } else {
       if (initialTab) {
@@ -115,7 +121,11 @@ export function HostManager({
               : initialTab;
         setActiveTab(normalizedTab);
       }
-      if (hostConfig && hostConfig.id !== lastProcessedHostIdRef.current) {
+      if (!hostConfig) {
+        lastProcessedHostIdRef.current = undefined;
+        setEditingHost(null);
+        setIsAddingHost(false);
+      } else if (hostConfig.id !== lastProcessedHostIdRef.current) {
         lastProcessedHostIdRef.current = hostConfig.id;
         setIsAddingHost(false);
         exportSSHHostWithCredentials(hostConfig.id)

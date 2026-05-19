@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { isElectron } from "@/lib/electron";
 import { getBasePath } from "@/lib/base-path";
 
 interface ServiceWorkerState {
@@ -16,14 +15,23 @@ export function useServiceWorker(): ServiceWorkerState {
   });
 
   useEffect(() => {
-    const isSupported =
-      "serviceWorker" in navigator && !isElectron() && import.meta.env.PROD;
+    const isSupported = false;
     const reloadKey = "termix_sw_ready_reloaded";
 
     setState((prev) => ({ ...prev, isSupported }));
 
     const registerServiceWorker = async () => {
-      if (!isSupported) return;
+      if (!isSupported) {
+        if ("serviceWorker" in navigator) {
+          try {
+            const registrations = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(registrations.map((r) => r.unregister()));
+          } catch (error) {
+            console.error("[SW] Failed to unregister existing service workers:", error);
+          }
+        }
+        return;
+      }
       try {
         const registration = await navigator.serviceWorker.register(
           `${getBasePath()}/sw.js`,

@@ -204,6 +204,8 @@ app.use(bodyParser.raw({ limit: "5gb", type: "application/octet-stream" }));
 app.use(cookieParser());
 app.use((_req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   next();
 });
 
@@ -1783,7 +1785,12 @@ if (frontendDist) {
           .replaceAll(path.sep, "/");
 
         if (relativePath.startsWith("assets/")) {
-          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          res.setHeader(
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+          );
+          res.setHeader("Pragma", "no-cache");
+          res.setHeader("Expires", "0");
           return;
         }
 
@@ -1796,6 +1803,10 @@ if (frontendDist) {
             "Cache-Control",
             "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
           );
+          if (relativePath === "index.html") {
+            res.setHeader("Pragma", "no-cache");
+            res.setHeader("Expires", "0");
+          }
         }
       },
     }),
@@ -1807,6 +1818,8 @@ if (frontendDist) {
         "Cache-Control",
         "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
       );
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
       res.sendFile(path.join(frontendDist, "index.html"));
     } else {
       next();

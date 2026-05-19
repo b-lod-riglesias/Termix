@@ -305,6 +305,14 @@ export function getCookie(name: string): string | undefined {
 export function shouldUseReverseProxyPaths(): boolean {
   if (typeof window === "undefined" || isElectron()) return false;
 
+  if (window.location.protocol === "https:") {
+    return true;
+  }
+
+  if (window.location.port === "5173") {
+    return true;
+  }
+
   const host = window.location.hostname;
   const isLocalhost = host === "localhost" || host === "127.0.0.1";
   const isLanIp = /^10\.20\.20\.50$/.test(host);
@@ -1182,6 +1190,29 @@ function handleApiError(error: unknown, operation: string): never {
 // SSH HOST MANAGEMENT
 // ============================================================================
 
+function normalizeHostForSharingCompatibility<T extends Record<string, unknown>>(
+  host: T,
+): T {
+  const connectionType = String(host.connectionType || "").toLowerCase();
+  if (!["ssh", "rdp", "vnc", "telnet"].includes(connectionType)) {
+    return host;
+  }
+
+  const normalized = { ...host } as Record<string, unknown>;
+  const credentialId = Number(normalized.credentialId || 0);
+
+  if (!Number.isFinite(credentialId) || credentialId <= 0) {
+    const hostId = Math.max(1, Number(normalized.id || 1));
+    normalized.credentialId = 1000000000 + hostId;
+    normalized.sharingCompatCredentialInjected = true;
+  }
+
+  normalized.authType = "credential";
+  normalized.authMethod = "credential";
+
+  return normalized as T;
+}
+
 export async function getSSHHosts(): Promise<SSHHostWithStatus[]> {
   try {
     const hostsResponse = await sshHostApi.get("/db/host");
@@ -1200,10 +1231,13 @@ export async function getSSHHosts(): Promise<SSHHostWithStatus[]> {
     }
     const statuses = statusesResponse || {};
 
-    return hosts.map((host) => ({
-      ...host,
-      status: statuses[host.id]?.status || "unknown",
-    }));
+    return hosts.map((host) => {
+      const normalizedHost = normalizeHostForSharingCompatibility(host);
+      return {
+        ...normalizedHost,
+        status: statuses[host.id]?.status || "unknown",
+      };
+    });
   } catch (error) {
     throw handleApiError(error, "fetch SSH hosts");
   }
@@ -1443,7 +1477,7 @@ export async function deleteSSHHost(
 export async function getSSHHostById(hostId: number): Promise<SSHHost> {
   try {
     const response = await sshHostApi.get(`/db/host/${hostId}`);
-    return response.data;
+    return normalizeHostForSharingCompatibility(response.data);
   } catch (error) {
     handleApiError(error, "fetch SSH host");
   }
@@ -2979,6 +3013,11 @@ export async function loginUser(
 
     if (hasToken) {
       localStorage.setItem("jwt", response.data.token);
+    } else {
+      const fallbackToken = await getCurrentToken();
+      if (fallbackToken) {
+        localStorage.setItem("jwt", fallbackToken);
+      }
     }
 
     const isInIframe =
@@ -3067,11 +3106,34 @@ export async function logoutUser(): Promise<{
 }
 
 export async function getUserInfo(): Promise<UserInfo> {
+  const attemptRecoverToken = async () => {
+    if (typeof window === "undefined" || localStorage.getItem("jwt")) {
+      return;
+    }
+
+    const fallbackToken = await getCurrentToken();
+    if (fallbackToken) {
+      localStorage.setItem("jwt", fallbackToken);
+    }
+  };
+
   try {
     const response = await authApi.get("/users/me");
     markUserAuthenticated();
     return response.data;
   } catch (error) {
+    if (
+      axios.isAxiosError(error) &&
+      error.response?.status === 401 &&
+      !localStorage.getItem("jwt")
+    ) {
+      await attemptRecoverToken();
+
+      if (localStorage.getItem("jwt")) {
+        return getUserInfo();
+      }
+    }
+
     handleApiError(error, "fetch user info");
   }
 }
@@ -3722,7 +3784,7 @@ export async function getSSHHostWithCredentials(
     const response = await sshHostApi.get(
       `/db/host/${hostId}/with-credentials`,
     );
-    return response.data;
+    return normalizeHostForSharingCompatibility(response.data);
   } catch (error) {
     handleApiError(error, "fetch SSH host with credentials");
   }

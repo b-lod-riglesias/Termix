@@ -112,7 +112,35 @@ export default defineConfig({
         }
       : false,
     port: 5173,
-    host: "localhost",
+    host: "0.0.0.0",
     allowedHosts: ["termix.cpd.local", "10.20.20.50", "localhost"],
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:30001",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+      "/ssh/websocket": {
+        target: "ws://127.0.0.1:30002",
+        ws: true,
+        changeOrigin: true,
+      },
+      "/guacamole/websocket": {
+        target: "ws://127.0.0.1:30008",
+        ws: true,
+        changeOrigin: true,
+      },
+    },
+  },
+  preview: {
+    host: "0.0.0.0",
+    port: 5173,
+    strictPort: true,
+    headers: {
+      "Cache-Control":
+        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
   },
 });

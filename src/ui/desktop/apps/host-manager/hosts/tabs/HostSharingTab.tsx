@@ -27,7 +27,6 @@ import {
   shareHost,
   getHostAccess,
   revokeHostAccess,
-  getSSHHostById,
   type Role,
   type AccessRecord,
 } from "@/ui/main-axios.ts";
@@ -55,7 +54,6 @@ import {
   Clock,
   UserCircle,
 } from "lucide-react";
-import type { SSHHost } from "@/types";
 
 interface User {
   id: string;
@@ -83,7 +81,6 @@ export function HostSharingTab({
   const [accessList, setAccessList] = React.useState<AccessRecord[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [currentUserId, setCurrentUserId] = React.useState<string>("");
-  const [hostData, setHostData] = React.useState<SSHHost | null>(null);
 
   const [userComboOpen, setUserComboOpen] = React.useState(false);
   const [roleComboOpen, setRoleComboOpen] = React.useState(false);
@@ -128,26 +125,13 @@ export function HostSharingTab({
     }
   }, [hostId]);
 
-  const loadHostData = React.useCallback(async () => {
-    if (!hostId) return;
-
-    try {
-      const host = await getSSHHostById(hostId);
-      setHostData(host);
-    } catch (error) {
-      console.error("Failed to load host data:", error);
-      setHostData(null);
-    }
-  }, [hostId]);
-
   React.useEffect(() => {
     loadRoles();
     loadUsers();
     if (!isNewHost) {
       loadAccessList();
-      loadHostData();
     }
-  }, [loadRoles, loadUsers, loadAccessList, loadHostData, isNewHost]);
+  }, [loadRoles, loadUsers, loadAccessList, isNewHost]);
 
   React.useEffect(() => {
     const fetchCurrentUser = async () => {
@@ -198,8 +182,12 @@ export function HostSharingTab({
       setSelectedRoleId(null);
       setExpiresInHours("");
       loadAccessList();
-    } catch {
-      toast.error(t("rbac.failedToShare"));
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : t("rbac.failedToShare");
+      toast.error(message);
     }
   };
 
@@ -255,49 +243,37 @@ export function HostSharingTab({
 
   return (
     <div className="space-y-6">
-      {!hostData?.credentialId && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>{t("rbac.credentialRequired")}</AlertTitle>
-          <AlertDescription>
-            {t("rbac.credentialRequiredDescription")}
-          </AlertDescription>
-        </Alert>
-      )}
+      <div className="hidden" data-sharing-ui-version="share-any-auth-v3" />
+      <>
+        <div className="space-y-4 border rounded-lg p-4">
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <Plus className="h-5 w-5" />
+            {t("rbac.shareHost")}
+          </h3>
 
-      {hostData?.credentialId && (
-        <>
-          <div className="space-y-4 border rounded-lg p-4">
-            <h3 className="text-lg font-semibold flex items-center gap-2">
-              <Plus className="h-5 w-5" />
-              {t("rbac.shareHost")}
-            </h3>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 px-3 text-xs"
+            onClick={() => window.open("https://docs.termix.site/rbac", "_blank")}
+          >
+            {t("common.documentation")}
+          </Button>
 
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 px-3 text-xs"
-              onClick={() =>
-                window.open("https://docs.termix.site/rbac", "_blank")
-              }
-            >
-              {t("common.documentation")}
-            </Button>
-
-            <Tabs
-              value={shareType}
-              onValueChange={(v) => setShareType(v as "user" | "role")}
-            >
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="user" className="flex items-center gap-2">
-                  <UserCircle className="h-4 w-4" />
-                  {t("rbac.shareWithUser")}
-                </TabsTrigger>
-                <TabsTrigger value="role" className="flex items-center gap-2">
-                  <Shield className="h-4 w-4" />
-                  {t("rbac.shareWithRole")}
-                </TabsTrigger>
-              </TabsList>
+          <Tabs
+            value={shareType}
+            onValueChange={(v) => setShareType(v as "user" | "role")}
+          >
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="user" className="flex items-center gap-2">
+                <UserCircle className="h-4 w-4" />
+                {t("rbac.shareWithUser")}
+              </TabsTrigger>
+              <TabsTrigger value="role" className="flex items-center gap-2">
+                <Shield className="h-4 w-4" />
+                {t("rbac.shareWithRole")}
+              </TabsTrigger>
+            </TabsList>
 
               <TabsContent value="user" className="space-y-4">
                 <div className="space-y-2">
@@ -406,160 +382,142 @@ export function HostSharingTab({
                   </Popover>
                 </div>
               </TabsContent>
-            </Tabs>
+          </Tabs>
 
-            <div className="space-y-2">
-              <label>{t("rbac.permissionLevel")}</label>
-              <div className="text-sm text-muted-foreground">
-                {t("rbac.view")} - {t("rbac.viewDesc")}
-              </div>
+          <div className="space-y-2">
+            <label>{t("rbac.permissionLevel")}</label>
+            <div className="text-sm text-muted-foreground">
+              {t("rbac.view")} - {t("rbac.viewDesc")}
             </div>
-
-            <div className="space-y-2">
-              <label htmlFor="expires-in">{t("rbac.durationHours")}</label>
-              <Input
-                id="expires-in"
-                type="number"
-                value={expiresInHours}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  if (value === "" || /^\d+$/.test(value)) {
-                    setExpiresInHours(value);
-                  }
-                }}
-                placeholder={t("rbac.neverExpires")}
-                min="1"
-              />
-            </div>
-
-            <Button
-              type="button"
-              onClick={handleShare}
-              className="w-full"
-              disabled={!hostData?.credentialId}
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              {t("rbac.share")}
-            </Button>
           </div>
 
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold flex items-center gap-2">
-              <Users className="h-5 w-5" />
-              {t("rbac.accessList")}
-            </h3>
+          <div className="space-y-2">
+            <label htmlFor="expires-in">{t("rbac.durationHours")}</label>
+            <Input
+              id="expires-in"
+              type="number"
+              value={expiresInHours}
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value === "" || /^\d+$/.test(value)) {
+                  setExpiresInHours(value);
+                }
+              }}
+              placeholder={t("rbac.neverExpires")}
+              min="1"
+            />
+          </div>
 
-            <Table>
-              <TableHeader>
+          <Button type="button" onClick={handleShare} className="w-full">
+            <Plus className="h-4 w-4 mr-2" />
+            {t("rbac.share")}
+          </Button>
+        </div>
+
+        <div className="space-y-4">
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <Users className="h-5 w-5" />
+            {t("rbac.accessList")}
+          </h3>
+
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t("rbac.type")}</TableHead>
+                <TableHead>{t("rbac.target")}</TableHead>
+                <TableHead>{t("rbac.permissionLevel")}</TableHead>
+                <TableHead>{t("rbac.grantedBy")}</TableHead>
+                <TableHead>{t("rbac.expires")}</TableHead>
+                <TableHead className="text-right">{t("common.actions")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {loading ? (
                 <TableRow>
-                  <TableHead>{t("rbac.type")}</TableHead>
-                  <TableHead>{t("rbac.target")}</TableHead>
-                  <TableHead>{t("rbac.permissionLevel")}</TableHead>
-                  <TableHead>{t("rbac.grantedBy")}</TableHead>
-                  <TableHead>{t("rbac.expires")}</TableHead>
-                  <TableHead className="text-right">
-                    {t("common.actions")}
-                  </TableHead>
+                  <TableCell
+                    colSpan={6}
+                    className="text-center text-muted-foreground"
+                  >
+                    {t("common.loading")}
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {loading ? (
-                  <TableRow>
-                    <TableCell
-                      colSpan={6}
-                      className="text-center text-muted-foreground"
-                    >
-                      {t("common.loading")}
-                    </TableCell>
-                  </TableRow>
-                ) : accessList.length === 0 ? (
-                  <TableRow>
-                    <TableCell
-                      colSpan={6}
-                      className="text-center text-muted-foreground"
-                    >
-                      {t("rbac.noAccessRecords")}
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  accessList.map((access) => (
-                    <TableRow
-                      key={access.id}
-                      className={
-                        isExpired(access.expiresAt) ? "opacity-50" : ""
-                      }
-                    >
-                      <TableCell>
-                        {access.targetType === "user" ? (
-                          <Badge
-                            variant="outline"
-                            className="flex items-center gap-1 w-fit"
-                          >
-                            <UserCircle className="h-3 w-3" />
-                            {t("rbac.user")}
-                          </Badge>
-                        ) : (
-                          <Badge
-                            variant="outline"
-                            className="flex items-center gap-1 w-fit"
-                          >
-                            <Shield className="h-3 w-3" />
-                            {t("rbac.role")}
-                          </Badge>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {access.targetType === "user"
-                          ? access.username
-                          : t(access.roleDisplayName || access.roleName || "")}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary">
-                          {access.permissionLevel}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>{access.grantedByUsername}</TableCell>
-                      <TableCell>
-                        {access.expiresAt ? (
-                          <div className="flex items-center gap-2">
-                            <Clock className="h-3 w-3" />
-                            <span
-                              className={
-                                isExpired(access.expiresAt)
-                                  ? "text-red-500"
-                                  : ""
-                              }
-                            >
-                              {formatDate(access.expiresAt)}
-                              {isExpired(access.expiresAt) && (
-                                <span className="ml-2">
-                                  ({t("rbac.expired")})
-                                </span>
-                              )}
-                            </span>
-                          </div>
-                        ) : (
-                          t("rbac.never")
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => handleRevoke(access.id)}
+              ) : accessList.length === 0 ? (
+                <TableRow>
+                  <TableCell
+                    colSpan={6}
+                    className="text-center text-muted-foreground"
+                  >
+                    {t("rbac.noAccessRecords")}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                accessList.map((access) => (
+                  <TableRow
+                    key={access.id}
+                    className={isExpired(access.expiresAt) ? "opacity-50" : ""}
+                  >
+                    <TableCell>
+                      {access.targetType === "user" ? (
+                        <Badge
+                          variant="outline"
+                          className="flex items-center gap-1 w-fit"
                         >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </>
-      )}
+                          <UserCircle className="h-3 w-3" />
+                          {t("rbac.user")}
+                        </Badge>
+                      ) : (
+                        <Badge
+                          variant="outline"
+                          className="flex items-center gap-1 w-fit"
+                        >
+                          <Shield className="h-3 w-3" />
+                          {t("rbac.role")}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {access.targetType === "user"
+                        ? access.username
+                        : t(access.roleDisplayName || access.roleName || "")}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">{access.permissionLevel}</Badge>
+                    </TableCell>
+                    <TableCell>{access.grantedByUsername}</TableCell>
+                    <TableCell>
+                      {access.expiresAt ? (
+                        <div className="flex items-center gap-2">
+                          <Clock className="h-3 w-3" />
+                          <span
+                            className={isExpired(access.expiresAt) ? "text-red-500" : ""}
+                          >
+                            {formatDate(access.expiresAt)}
+                            {isExpired(access.expiresAt) && (
+                              <span className="ml-2">({t("rbac.expired")})</span>
+                            )}
+                          </span>
+                        </div>
+                      ) : (
+                        t("rbac.never")
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleRevoke(access.id)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </>
     </div>
   );
 }

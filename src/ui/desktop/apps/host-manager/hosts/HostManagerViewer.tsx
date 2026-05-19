@@ -175,6 +175,18 @@ export function HostManagerViewer({
 
       const cleanedHosts = data.map((host) => {
         const cleanedHost = { ...host };
+        const connectionType = String(cleanedHost.connectionType || "ssh")
+          .toLowerCase()
+          .trim();
+        const needsShareCompat =
+          ["ssh", "rdp", "vnc", "telnet"].includes(connectionType) &&
+          (!cleanedHost.credentialId || cleanedHost.credentialId <= 0);
+
+        if (needsShareCompat) {
+          cleanedHost.credentialId = 1000000000 + Number(cleanedHost.id || 1);
+          cleanedHost.authType = "credential";
+        }
+
         if (cleanedHost.credentialId && cleanedHost.key) {
           cleanedHost.key = undefined;
           cleanedHost.keyPassword = undefined;

@@ -381,6 +381,18 @@ const wss = new WebSocketServer({
         }
       }
 
+      if (!token && info.req.url) {
+        try {
+          const requestUrl = new URL(info.req.url, "http://termix.local");
+          const queryToken = requestUrl.searchParams.get("token");
+          if (queryToken) {
+            token = queryToken;
+          }
+        } catch {
+          // Keep the existing cookie/header auth failure path for malformed URLs.
+        }
+      }
+
       if (!token) {
         return false;
       }
@@ -429,6 +441,18 @@ wss.on("connection", async (ws: WebSocket, req) => {
       const authHeader = req.headers.authorization;
       if (authHeader?.startsWith("Bearer ")) {
         token = authHeader.slice("Bearer ".length);
+      }
+    }
+
+    if (!token && req.url) {
+      try {
+        const requestUrl = new URL(req.url, "http://termix.local");
+        const queryToken = requestUrl.searchParams.get("token");
+        if (queryToken) {
+          token = queryToken;
+        }
+      } catch {
+        // Keep the existing cookie/header auth failure path for malformed URLs.
       }
     }
 

@@ -84,6 +84,57 @@ const authManager = AuthManager.getInstance();
 const authenticateJWT = authManager.createAuthMiddleware();
 const requireDataAccess = authManager.createDataAccessMiddleware();
 
+function buildShareCompatCredentialId(hostId: number): number {
+  return 1000000000 + Math.max(1, hostId);
+}
+
+function parseShareCompatCredentialHostId(credentialId: number): number | null {
+  if (!Number.isFinite(credentialId) || credentialId < 1000000001) {
+    return null;
+  }
+  const hostId = credentialId - 1000000000;
+  return hostId > 0 ? hostId : null;
+}
+
+function buildShareCompatCredentialFromHost(
+  host: Record<string, unknown>,
+  userId: string,
+): Record<string, unknown> {
+  const hostId = typeof host.id === "number" ? host.id : 0;
+  const hasKey = isNonEmptyString(host.key);
+  const hasPassword = isNonEmptyString(host.password);
+  const authType = hasKey ? "key" : hasPassword ? "password" : "password";
+  const tags =
+    typeof host.tags === "string"
+      ? host.tags
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean)
+      : [];
+
+  return {
+    id: buildShareCompatCredentialId(hostId),
+    userId,
+    name: `[Share Compat] ${host.name || `Host ${hostId}`}`,
+    description: "Virtual credential for legacy sharing compatibility",
+    folder: host.folder || null,
+    tags,
+    authType,
+    username: host.username || "",
+    password: hasPassword ? host.password : "",
+    key: hasKey ? host.key : "",
+    privateKey: hasKey ? host.key : "",
+    publicKey: "",
+    keyPassword: isNonEmptyString(host.keyPassword) ? host.keyPassword : "",
+    keyType: isNonEmptyString(host.keyType) ? host.keyType : "auto",
+    detectedKeyType: isNonEmptyString(host.keyType) ? host.keyType : null,
+    usageCount: 0,
+    lastUsed: null,
+    createdAt: host.createdAt || new Date().toISOString(),
+    updatedAt: host.updatedAt || new Date().toISOString(),
+  };
+}
+
 /**
  * @openapi
  * /credentials:
@@ -309,7 +360,77 @@ router.get(
         userId,
       );
 
-      res.json(credentials.map((cred) => formatCredentialOutput(cred)));
+      const formatted = credentials.map((cred) => formatCredentialOutput(cred));
+
+      const hostRows = await db
+        .select({
+          id: hosts.id,
+          name: hosts.name,
+          username: hosts.username,
+          folder: hosts.folder,
+          tags: hosts.tags,
+          credentialId: hosts.credentialId,
+          authType: hosts.authType,
+          connectionType: hosts.connectionType,
+          password: hosts.password,
+          key: hosts.key,
+          updatedAt: hosts.updatedAt,
+          createdAt: hosts.createdAt,
+        })
+        .from(hosts)
+        .where(eq(hosts.userId, userId));
+
+      const compatCredentials = hostRows
+        .filter((host) => {
+          const connectionType = (host.connectionType || "").toLowerCase();
+          return (
+            ["ssh", "rdp", "vnc", "telnet"].includes(connectionType) &&
+            (!host.credentialId || host.credentialId <= 0)
+          );
+        })
+        .map((host) => {
+          const hasKey = isNonEmptyString(host.key);
+          const hasPassword = isNonEmptyString(host.password);
+          const authType = hasKey ? "key" : hasPassword ? "password" : "password";
+          const syntheticId = buildShareCompatCredentialId(host.id);
+          return {
+            id: syntheticId,
+            userId,
+            name: `[Share Compat] ${host.name || `Host ${host.id}`}`,
+            description: "Virtual credential for legacy sharing compatibility",
+            folder: host.folder || null,
+            tags: host.tags
+              ? String(host.tags)
+                  .split(",")
+                  .map((tag) => tag.trim())
+                  .filter(Boolean)
+              : [],
+            authType,
+            username: host.username || "",
+            password: hasPassword ? host.password : "",
+            key: hasKey ? host.key : "",
+            keyPassword: "",
+            keyType: "auto",
+            usageCount: 0,
+            lastUsed: null,
+            createdAt: host.createdAt || new Date().toISOString(),
+            updatedAt: host.updatedAt || new Date().toISOString(),
+          };
+        });
+
+      const byId = new Map<number, ReturnType<typeof formatCredentialOutput>>();
+      for (const cred of formatted) {
+        if (typeof cred.id === "number" && Number.isFinite(cred.id)) {
+          byId.set(cred.id, cred);
+        }
+      }
+      for (const cred of compatCredentials) {
+        if (!byId.has(cred.id)) {
+          byId.set(cred.id, cred);
+        }
+      }
+
+      res.json(Array.from(byId.values()));
     } catch (err) {
       authLogger.error("Failed to fetch credentials", err);
       res.status(500).json({ error: "Failed to fetch credentials" });
@@ -407,13 +528,16 @@ router.get(
     }
 
     try {
+      const credentialNumericId = parseInt(id, 10);
+      const compatHostId = parseShareCompatCredentialHostId(credentialNumericId);
+
       const credentials = await SimpleDBOps.select(
         db
           .select()
           .from(sshCredentials)
           .where(
             and(
-              eq(sshCredentials.id, parseInt(id)),
+              eq(sshCredentials.id, credentialNumericId),
               eq(sshCredentials.userId, userId),
             ),
           ),
@@ -422,6 +546,25 @@ router.get(
       );
 
       if (credentials.length === 0) {
+        if (compatHostId) {
+          const hostRows = await SimpleDBOps.select(
+            db
+              .select()
+              .from(hosts)
+              .where(and(eq(hosts.id, compatHostId), eq(hosts.userId, userId)))
+              .limit(1),
+            "ssh_data",
+            userId,
+          );
+
+          if (hostRows.length > 0) {
+            const virtualCredential = buildShareCompatCredentialFromHost(
+              hostRows[0] as Record<string, unknown>,
+              userId,
+            );
+            return res.json(virtualCredential);
+          }
+        }
         return res.status(404).json({ error: "Credential not found" });
       }
 
@@ -907,12 +1050,25 @@ router.get(
     }
 
     try {
+      const credentialNumericId = parseInt(credentialId, 10);
+      const compatHostId = parseShareCompatCredentialHostId(credentialNumericId);
+
+      if (compatHostId) {
+        const hostRows = await db
+          .select()
+          .from(hosts)
+          .where(and(eq(hosts.id, compatHostId), eq(hosts.userId, userId)))
+          .limit(1);
+
+        return res.json(hostRows.map((host) => formatSSHHostOutput(host)));
+      }
+
       const hostsUsingCredential = await db
         .select()
         .from(hosts)
         .where(
           and(
-            eq(hosts.credentialId, parseInt(credentialId)),
+            eq(hosts.credentialId, credentialNumericId),
             eq(hosts.userId, userId),
           ),
         );

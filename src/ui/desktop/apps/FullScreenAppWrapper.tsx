@@ -78,7 +78,7 @@ export const FullScreenAppWrapper: React.FC<FullScreenAppWrapperProps> = ({
 
   const handleAuthSuccess = () => {
     setIsAuthenticated(true);
-    window.location.reload();
+    setAuthLoading(false);
   };
 
   if (authLoading) {
